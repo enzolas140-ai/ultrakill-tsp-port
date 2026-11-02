@@ -72,6 +72,7 @@ add_executable(bridge
 target_link_libraries(bridge
   PRIVATE
     ${SDL2_LIBRARIES}
+    android_stub
     dl m pthread)
 target_link_directories(bridge PRIVATE ${SDL2_LIBRARY_DIRS})
 # -rdynamic (export-dynamic): faz shim_get_native_window visivel via
