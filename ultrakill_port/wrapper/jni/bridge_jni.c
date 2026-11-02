@@ -347,7 +347,13 @@ static jint JNICALL j_CallStaticIntMethod(JNIEnv *e, jclass c, jmethodID m, ...)
 }
 static jlong JNICALL j_CallStaticLongMethod(JNIEnv *e, jclass c, jmethodID m, ...) { (void)e; (void)c; (void)m; return 0; }
 static jboolean JNICALL j_CallStaticBooleanMethod(JNIEnv *e, jclass c, jmethodID m, ...) { (void)e; (void)c; (void)m; return JNI_FALSE; }
-static jobject JNICALL j_CallStaticObjectMethod(JNIEnv *e, jclass c, jmethodID m, ...) { (void)e; (void)c; (void)m; return NULL; }
+static jobject JNICALL j_CallStaticObjectMethod(JNIEnv *e, jclass c, jmethodID m, ...) {
+  (void)e; (void)m;
+  const char *cn = c ? ((struct _jobjectRef*)c)->name : "?";
+  fprintf(stderr, "JNI static-obj-call: %s#%s\n", cn,
+          m ? mbase(((struct _jobjectRef*)m)->name) : "?");
+  return new_obj(cn);   /* NUNCA NULL - chamadores deref o resultado */
+}
 static void JNICALL j_CallStaticVoidMethod(JNIEnv *e, jclass c, jmethodID m, ...) { (void)e; (void)c; (void)m; }
 
 /* Variantes V/A só delegam pro variadic (nós ignoramos args) */
@@ -613,15 +619,83 @@ static jint JNICALL j_MonitorExit(JNIEnv *e, jobject o)  { (void)e; (void)o; ret
 /* GetObjectRefType - 0=Invalid, 1=Local, 2=Global, 3=Weak, 4=Indexed */
 static jint JNICALL j_GetObjectRefType(JNIEnv *e, jobject o) { (void)e; (void)o; return 1; }
 
+/* -------- slots que faltavam e derrubavam initJni em pc=0x0 -------- */
+/* initJni do Unity 2019.4 comeca com env->GetJavaVM(&vm); slot NULL =
+ * bl 0 -> SIGSEGV imediato (crash visto no device). */
+static jint JNICALL j_GetJavaVM(JNIEnv *e, void **vm) {
+  extern const void *shim_jni_vm_cell_ptr(void);
+  if (vm) *vm = (void*)shim_jni_vm_cell_ptr();
+  (void)e;
+  return JNI_OK;
+}
+
+/* Strings UTF-16 minimais: NewString guarda buffer no aux, len no refs. */
+static jstring JNICALL j_NewString(JNIEnv *e, const jchar *unicode, jsize len) {
+  (void)e;
+  struct _jobjectRef *r = ref_alloc(JT_STRING, "", NULL);
+  jsize n = len > 0 ? len : 0;
+  r->refs = n;
+  if (n && unicode) {
+    jchar *buf = malloc((size_t)n * sizeof(jchar));
+    memcpy(buf, unicode, (size_t)n * sizeof(jchar));
+    r->aux = buf;
+  }
+  return (jstring)r;
+}
+static const jchar *JNICALL j_GetStringChars(JNIEnv *e, jstring s, jboolean *ic) {
+  (void)e; if (ic) *ic = JNI_FALSE;
+  return (const jchar*)(s ? ((struct _jobjectRef*)s)->aux : NULL);
+}
+static void JNICALL j_ReleaseStringChars(JNIEnv *e, jstring s, const jchar *p) {
+  (void)e; (void)s; (void)p;
+}
+static void JNICALL j_GetStringRegion(JNIEnv *e, jstring s, jsize st, jsize ln, jchar *dst) {
+  (void)e;
+  const jchar *src = s ? (const jchar*)((struct _jobjectRef*)s)->aux : NULL;
+  if (src && dst && ln > 0) memcpy(dst, src + st, (size_t)ln * sizeof(jchar));
+}
+static void JNICALL j_GetStringUTFRegion(JNIEnv *e, jstring s, jsize st, jsize ln, char *dst) {
+  (void)e;
+  if (!s || !dst || ln <= 0) return;
+  const char *utf = ((struct _jobjectRef*)s)->name;
+  if (!utf) { memset(dst, 0, (size_t)ln); return; }
+  size_t slen = strlen(utf);
+  size_t n = (size_t)ln < slen - (size_t)st ? (size_t)ln : (slen > (size_t)st ? slen - (size_t)st : 0);
+  memcpy(dst, utf + st, n);
+  if (n < (size_t)ln) memset(dst + n, 0, (size_t)ln - n);
+}
+static const jchar *JNICALL j_GetStringCritical(JNIEnv *e, jstring s, jboolean *ic) {
+  return j_GetStringChars(e, s, ic);
+}
+static void JNICALL j_ReleaseStringCritical(JNIEnv *e, jstring s, const jchar *p) {
+  (void)e; (void)s; (void)p;
+}
+
+/* Weak refs: pool nunca libera -> fraco == forte. */
+static jobjectRef JNICALL j_NewWeakGlobalRef(JNIEnv *e, jobject o) { (void)e; return (jobjectRef)o; }
+static void JNICALL j_DeleteWeakGlobalRef(JNIEnv *e, jobjectRef r) { (void)e; (void)r; }
+
+/* Reflection: passthrough de refs. */
+static jmethodID JNICALL j_FromReflectedMethod(JNIEnv *e, jobject m) { (void)e; return (jmethodID)m; }
+static jfieldID  JNICALL j_FromReflectedField(JNIEnv *e, jobject f)  { (void)e; return (jfieldID)f; }
+static jobject JNICALL j_ToReflectedMethod(JNIEnv *e, jclass c, jmethodID m, jboolean st) {
+  (void)e; (void)c; (void)st; return (jobject)m;
+}
+static jobject JNICALL j_ToReflectedField(JNIEnv *e, jclass c, jfieldID f, jboolean st) {
+  (void)e; (void)c; (void)st; return (jobject)f;
+}
+
 /* -------- vtable estática -------- */
 static const struct JNINativeInterface_ g_env_vtable = {
   .reserved0 = NULL, .reserved1 = NULL, .reserved2 = NULL, .reserved3 = NULL,
   .GetVersion = j_GetVersion,
   .FindClass = j_FindClass,
-  .FromReflectedMethod = NULL, .FromReflectedField = NULL, .ToReflectedMethod = NULL,
+  .FromReflectedMethod = j_FromReflectedMethod,
+  .FromReflectedField = j_FromReflectedField,
+  .ToReflectedMethod = j_ToReflectedMethod,
   .GetSuperclass = j_GetSuperclass,
   .IsAssignableFrom = j_IsAssignableFrom,
-  .ToReflectedField = NULL,
+  .ToReflectedField = j_ToReflectedField,
   .Throw = j_Throw, .ThrowNew = j_ThrowNew,
   .ExceptionOccurred = j_ExceptionOccurred,
   .ExceptionDescribe = j_ExceptionDescribe,
@@ -671,12 +745,14 @@ static const struct JNINativeInterface_ g_env_vtable = {
   .GetStaticBooleanField = j_GetStaticBooleanField,
   .GetStaticObjectField = j_GetStaticObjectField,
   .SetStaticIntField = j_SetStaticIntField,
-  .NewString = NULL,
+  .NewString = j_NewString,
   .GetStringLength = j_GetStringLength,
   .NewStringUTF = j_NewStringUTF,
   .GetStringUTFLength = j_GetStringUTFLength,
   .GetStringUTFChars = j_GetStringUTFChars,
   .ReleaseStringUTFChars = j_ReleaseStringUTFChars,
+  .ReleaseStringChars = j_ReleaseStringChars,
+  .GetStringChars = j_GetStringChars,
   .GetArrayLength = j_GetArrayLength,
   .NewObjectArray = j_NewObjectArray,
   .GetObjectArrayElement = j_GetObjectArrayElement,
@@ -726,6 +802,13 @@ static const struct JNINativeInterface_ g_env_vtable = {
   .RegisterNatives = j_RegisterNatives,
   .UnregisterNatives = j_UnregisterNatives,
   .MonitorEnter = j_MonitorEnter, .MonitorExit = j_MonitorExit,
+  .GetJavaVM = j_GetJavaVM,
+  .GetStringRegion = j_GetStringRegion,
+  .GetStringUTFRegion = j_GetStringUTFRegion,
+  .GetStringCritical = j_GetStringCritical,
+  .ReleaseStringCritical = j_ReleaseStringCritical,
+  .NewWeakGlobalRef = j_NewWeakGlobalRef,
+  .DeleteWeakGlobalRef = j_DeleteWeakGlobalRef,
   .ExceptionCheck = j_ExceptionCheck,
   .NewDirectByteBuffer = j_NewDirectByteBuffer,
   .GetDirectBufferAddress = j_GetDirectBufferAddress,
@@ -769,6 +852,12 @@ static const struct JNIInvokeInterface_ g_vm_vtable = {
 static void jni_ensure_cells(void) {
   if (!g_env_cell) g_env_cell = &g_env_vtable;
   if (!g_vm_cell)  g_vm_cell  = &g_vm_vtable;
+}
+
+__attribute__((visibility("default")))
+const void *shim_jni_vm_cell_ptr(void) {
+  jni_ensure_cells();
+  return &g_vm_cell;
 }
 
 __attribute__((visibility("default")))
