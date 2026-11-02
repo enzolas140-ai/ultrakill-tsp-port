@@ -58,3 +58,19 @@ void __android_log_assert(const char *cond, const char *tag, const char *fmt, ..
 /* NDK 21 tambem exporta isto (chamado por libmonoutils): */
 __attribute__((visibility("default")))
 int __android_log_close(void) { return 0; }
+
+/* -------- __sF: Bionic stdio global FILE[3] {stdin,stdout,stderr} --------
+ * libunity.so/libil2cpp.so referenciam o simbolo de DADOS `__sF` (array de
+ * 3 FILE do Bionic). glibc nao exporta esse simbolo -> como e DATA, a
+ * relocacao nao pode ser lazy: o dlopen falha com "undefined symbol: __sF"
+ * mesmo com RTLD_LAZY. Definimos o array e preenchemos via construtor com
+ * os FILE reais do glibc, entao fprintf(&__sF[1],..) escreve em stdout de
+ * verdade. Indexacao Bionic: 0=stdin 1=stdout 2=stderr. */
+__attribute__((visibility("default")))
+FILE __sF[3];
+__attribute__((constructor))
+static void shim_init_sF(void) {
+  if (stdin)  __sF[0] = *stdin;
+  if (stdout) __sF[1] = *stdout;
+  if (stderr) __sF[2] = *stderr;
+}
