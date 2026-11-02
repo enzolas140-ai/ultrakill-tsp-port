@@ -381,9 +381,13 @@ shim_hook *shim_hook_register(void *unity_handle, const char *symbol_name,
   strncpy(h->sym_name, symbol_name, sizeof h->sym_name - 1);
   h->replacement_addr = replacement;
 
-  void *target = dlsym(unity_handle ? unity_handle : RTLD_DEFAULT, symbol_name);
-  if (!target) {
-    LOG("[hook] %s NAO esta em .dynsym (esperado em build stripped) - status NO_SYMBOL\n",
+  /* NAO fazemos dlsym(unity_handle, symbol_name) aqui: neste glibc do
+   * SpruceOS, dlsym de nome AUSENTE dentro de libunity.so derruba o
+   * loader (SIGSEGV ld+0x9048). E o build Android e stripped de qqr
+   * modo - esses candidatos C++ nunca estariam no .dynsym. */
+  __attribute__((unused)) void *target = NULL;
+  if (1) {
+    LOG("[hook] %s: dlsym pulado (loader instavel p/ nome ausente) - NO_SYMBOL\n",
         symbol_name);
     h->status = SHIM_HOOK_FAILED_NO_SYMBOL;
     if (out_original) *out_original = NULL;
