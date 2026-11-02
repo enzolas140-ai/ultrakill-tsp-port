@@ -1,0 +1,110 @@
+name: lab-test (headless ARM64 + screenshot)
+
+# Laboratorio virtual: roda o bridge num Linux ARM64 real (mesma arch do
+# TSP) com tela Xvfb + OpenGL por software (llvmpipe). Produz artifact com
+# ultrakill.log, player.log e screenshot.png - nada de precisar do cartao.
+#
+# Pre-requisitos (uma vez so): release "payload" contendo
+#   lab-payload.tar.gz  (gamedata/lib/arm64-v8a patcheados + libs SDL2 blob
+#                        + libs/arm64 alias libc.so etc)
+#   ULTRADROID.apk      (fonte p/ extrair gamedata se precisar)
+
+on:
+  workflow_dispatch:
+    inputs:
+      xvfb_res:
+        description: 'resolucao Xvfb LARGAExALTA'
+        required: false
+        default: '1280x720x24'
+      run_seconds:
+        description: 'segundos de execucao do bridge'
+        required: false
+        default: '60'
+
+jobs:
+  lab:
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: install runtime deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            xvfb x11-utils imagemagick xterm \
+            libgl1 libglx-mesa0 libegl1 libgles2 \
+            libsdl2-2.0-0 unzip
+          # llvmpipe garante GL 3.x por software via mesa
+          grep -i -m1 'model name' /proc/cpuinfo || true
+          python3 -c "print('ram gb', __import__('os').sysconf(__import__('os').SC_PHYS_PAGES)*4096/1e9)"
+
+      - name: fetch payload from release
+        run: |
+          set -e
+          tag=payload
+          gh release download $tag -R $GITHUB_REPOSITORY -p 'lab-payload.tar.gz' -p 'ULTRADROID.apk' || {
+            echo "::error::release 'payload' com lab-payload.tar.gz + ULTRADROID.apk nao encontrada"
+            exit 1
+          }
+          tar xzf lab-payload.tar.gz -C ultrakill_port
+          ls -la ultrakill_port/libs/arm64 | head -30
+          ls -la ultrakill_port/gamedata/lib/arm64-v8a
+        env:
+          GH_TOKEN: ${{ github.token }}
+
+      - name: re-aplicar unversion nos natives (defensivo)
+        run: |
+          pip install pyelftools
+          python ultrakill_port/tools/unversion_elf.py \
+            ultrakill_port/gamedata/lib/arm64-v8a/libunity.so \
+            ultrakill_port/gamedata/lib/arm64-v8a/libil2cpp.so \
+            ultrakill_port/gamedata/lib/arm64-v8a/libmain.so \
+            ultrakill_port/gamedata/lib/arm64-v8a/libstub.so 2>/dev/null || true
+
+      - name: run bridge headless
+        run: |
+          set -x
+          PD=$(pwd)/ultrakill_port
+          mkdir -p /tmp/uk
+          Xvfb :9 -screen 0 ${XVFB_RES} > /tmp/xvfb.log 2>&1 &
+          sleep 2
+          export DISPLAY=:9
+          export LD_LIBRARY_PATH="$PD/libs/arm64:$PD/gamedata/lib/arm64-v8a"
+          export LD_PRELOAD="$PD/libs/arm64/libEGL.so.1"
+          export ULTRAKILL_REAL_LIBEGL=/usr/lib/aarch64-linux-gnu/libEGL.so.1
+          export ULTRAKILL_LIBUNITY="$PD/gamedata/lib/arm64-v8a/libunity.so"
+          export ULTRAKILL_ASSET_ROOT="$PD/gamedata"
+          export SDL_VIDEODRIVER=x11
+          export GALLIUM_DRIVER=llvmpipe
+          export MESA_GL_VERSION_OVERRIDE=3.2
+          export MESA_GLES_VERSION_OVERRIDE=3.2
+          export HOME=/tmp/uk
+          cd "$PD/gamedata/bin"
+          timeout ${RUN_SECS} ./ultrakill -screen-width 480 -screen-height 270 \
+            -screen-fullscreen 0 -logFile /tmp/uk/player.log \
+            > /tmp/ultrakill.log 2>&1 || echo "exit=$?" >> /tmp/ultrakill.log
+          # screenshot da tela virtual (se algo desenhou, aparece aqui)
+          import -window root /tmp/screen.png 2>/dev/null || true
+          convert /tmp/screen.png /tmp/screen.jpg 2>/dev/null || true
+          tail -c 200000 /tmp/ultrakill.log > /tmp/ultrakill.tail.log || true
+
+        env:
+          XVFB_RES: ${{ github.event.inputs.xvfb_res || '1280x720x24' }}
+          RUN_SECS: ${{ github.event.inputs.run_seconds || '60' }}
+
+      - name: collect artifacts
+        run: |
+          mkdir -p out
+          cp -v /tmp/ultrakill.log out/ 2>/dev/null || true
+          cp -v /tmp/ultrakill.tail.log out/ 2>/dev/null || true
+          cp -v /tmp/uk/player.log out/player.log 2>/dev/null || true
+          cp -v /tmp/screen.png out/screen.png 2>/dev/null || true
+          cp -v /tmp/screen.jpg out/screen.jpg 2>/dev/null || true
+          cp -v /tmp/xvfb.log out/xvfb.log 2>/dev/null || true
+          ls -la out
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: lab-run
+          path: out
+          retention-days: 14
