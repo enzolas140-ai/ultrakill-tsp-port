@@ -303,24 +303,31 @@ export ULTRAKILL_PERSIST="$STATEDIR"
 # Detecta SDL_VIDEODRIVER. Em vez de chutar, lista o que o SDL2 do
 # SpruceOS realmente suporta (via strings na lib) e testa em ordem.
 {
-  SDL_LIB=$(find /usr/lib -maxdepth 3 -name 'libSDL2-2.0.so*' -o -name 'libSDL2.so*' 2>/dev/null | head -1)
-  echo "== SDL2 encontrado: ${SDL_LIB:-<nenhum>} =="
-  if [ -n "$SDL_LIB" ] && command -v strings >/dev/null; then
-    echo "  drivers compilados neste SDL2:"
-    strings "$SDL_LIB" | grep -E '^(x11|wayland|kmsdrm|fbcon|directfb|offscreen|dummy|raspberry_pi|android|uikit|cocoa|windows|ps2|vita)$' | sort -u | sed 's/^/    - /'
-  fi
+  # procura TODAS as libSDL2.so no sistema (SpruceOS pode ter mais de uma)
+  SDL_LIBS=$(find /usr/lib /lib /opt /userdata /mnt -maxdepth 4 \
+             \( -name 'libSDL2-2.0.so*' -o -name 'libSDL2.so*' \) 2>/dev/null | sort -u)
+  echo "== libSDL2 encontradas: =="
+  for L in $SDL_LIBS; do
+    echo "  $L"
+    if command -v strings >/dev/null; then
+      # VIDEODRIVERS validos do SDL2
+      drv=$(strings "$L" 2>/dev/null | grep -E '^(x11|wayland|wayland-egl|kmsdrm|fbcon|directfb|offscreen|dummy|rpi|android|uikit|cocoa|windows|ps2|psp|vita|emscripten|netbsdconsol|qnx|riscos)$' | sort -u | tr '\n' ' ')
+      echo "    drivers: $drv"
+    fi
+  done
 } 2>&1 | tee -a "$LOG"
 
-# Ordem de prioridade: se o display atual for X11 (DISPLAY setado),
-# tenta x11 primeiro. Se for Wayland, wayland. Depois kmsdrm/fbcon
-# (caso SpruceOS em bare-metal). offscreen/dummy no final.
-if [ -n "$DISPLAY" ]; then
-  CANDIDATES="x11 wayland kmsdrm fbcon offscreen dummy"
-elif [ -n "$WAYLAND_DISPLAY" ]; then
-  CANDIDATES="wayland x11 kmsdrm fbcon offscreen dummy"
-else
-  CANDIDATES="kmsdrm fbcon wayland x11 offscreen dummy"
-fi
+# Ordem: primeiro o que o proprio SDL escolhe (vazio), depois
+# explicitos. Se DISPLAY/WAYLAND_DISPLAY ja estao no env (ES
+# exportando p/ port), tenta-os primeiro.
+cand=""
+if [ -n "${DISPLAY:-}" ]; then cand="$cand x11"; fi
+if [ -n "${WAYLAND_DISPLAY:-}" ]; then cand="$cand wayland"; fi
+if [ -e /dev/dri/card0 ]; then cand="$cand kmsdrm"; fi
+if [ -e /dev/fb0 ]; then cand="$cand fbcon"; fi
+cand="$cand directfb offscreen dummy"
+CANDIDATES="$cand"
+echo "candidatos SDL_VIDEODRIVER a testar: $CANDIDATES" >> "$LOG"
 
 # ---------------------------------------------------------------- 7. EXEC
 BIN=""
