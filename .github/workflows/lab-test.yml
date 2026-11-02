@@ -68,6 +68,13 @@ jobs:
             ultrakill_port/gamedata/lib/arm64-v8a/libil2cpp.so \
             ultrakill_port/gamedata/lib/arm64-v8a/libmain.so \
             ultrakill_port/gamedata/lib/arm64-v8a/libstub.so 2>/dev/null || true
+          # Lab nao usa LD_PRELOAD (SDL e x11/GLX real do Mesa). Para o
+          # libunity ainda cair no NOSSO shim sem colidir de SONAME com o
+          # Mesa, renomeamos o shim p/ libeglshm.so (cabe no slot dynstr de
+          # 'libEGL.so') e reescrevemos o DT_NEEDED do libunity.
+          cp ultrakill_port/libs/arm64/libEGL.so.1 ultrakill_port/libs/arm64/libeglshm.so
+          python ultrakill_port/tools/rename_needed.py \
+            ultrakill_port/gamedata/lib/arm64-v8a/libunity.so libEGL.so libeglshm.so
 
       - name: run bridge headless
         run: |
@@ -77,8 +84,11 @@ jobs:
           Xvfb :9 -screen 0 ${XVFB_RES} > /tmp/xvfb.log 2>&1 &
           sleep 2
           export DISPLAY=:9
-          export LD_LIBRARY_PATH="$PD/libs/arm64:$PD/gamedata/lib/arm64-v8a"
-          export LD_PRELOAD="$PD/libs/arm64/libEGL.so.1"
+          export LD_LIBRARY_PATH="$PD/libs/arm64:$PD/gamedata/lib/arm64-v8a:/usr/lib/aarch64-linux-gnu"
+          # SEM LD_PRELOAD aqui: SDL roda x11/GLX (Mesa real), e preload do
+          # shim faria bridge_gl/shim conversarem consigo mesmos (SONAME
+          # colidente). O shim ainda e achado via DT_NEEDED "libEGL.so" do
+          # libunity (libs/arm64/libEGL.so) - mesmo que no TSP.
           export ULTRAKILL_REAL_LIBEGL=/usr/lib/aarch64-linux-gnu/libEGL.so.1
           export ULTRAKILL_LIBUNITY="$PD/gamedata/lib/arm64-v8a/libunity.so"
           export ULTRAKILL_ASSET_ROOT="$PD/gamedata"

@@ -86,7 +86,9 @@ static int load_egl(void) {
    * "libEGL.so" cai no proprio shim e recursa. Abrimos apenas a versao
    * .so.1 que o DDK real instala. */
   static const char *paths[] = {
-    "libEGL.so.1",
+    /* SO paths absolutos: "libEGL.so.1" (sem caminho) pode resolver para
+     * NOSSO shim via RUNPATH/LD_LIBRARY_PATH quando o shim esta tambem
+     * carregado (LD_PRELOAD), e entao bridge_gl falaria com ele mesmo. */
     "/usr/lib/libEGL.so.1",
     "/usr/lib/aarch64-linux-gnu/libEGL.so.1",
     "/usr/lib/arm-linux-gnueabihf/libEGL.so.1",
