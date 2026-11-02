@@ -257,6 +257,63 @@ done
 # Persistencia
 export ULTRAKILL_PERSIST="$STATEDIR"
 
+# ---------------------------------------------------------------- 6b. DESCOBRE DRIVER EGL REAL
+# SpruceOS nao usa os paths padrao do Debian para o DDK PowerVR. Varre
+# /usr/lib e subpasta, escolhe o candidato mais provavel, exporta em
+# ULTRAKILL_REAL_LIBEGL (o bridge_egl_shim.c pe esse env var primeiro).
+{
+  echo "== procurando driver EGL real no sistema =="
+  found=""
+  for pat in \
+      /usr/lib/libEGL.so.1 /usr/lib/libEGL.so \
+      /usr/lib/aarch64-linux-gnu/libEGL.so.1 \
+      /usr/lib/arm-linux-gnueabihf/libEGL.so.1 \
+      /usr/lib/egl/libEGL.so.1 /usr/lib/egl/libEGL.so \
+      /usr/lib/egl/libEGL*POWER* /usr/lib/egl/libEGL*Mali* \
+      /usr/lib/*/libEGL.so.1 /usr/lib/*/libEGL.so \
+      /usr/local/lib/libEGL.so.1 /opt/*/libEGL.so.1 \
+      /usr/lib/libEGL.pvr* /usr/lib/libEGLIMG* \
+      /usr/lib/hwdefault*/*/libEGL.so*; do
+    for f in $pat; do
+      [ -f "$f" ] || continue
+      # ignora NOSSO shim (esta em $SHIMDIR)
+      case "$f" in "$SHIMDIR"/*) continue ;; esac
+      echo "  achou: $f"
+      [ -z "$found" ] && found="$f"
+    done
+  done
+  if [ -n "$found" ]; then
+    echo "  usando como ULTRAKILL_REAL_LIBEGL: $found"
+    export ULTRAKILL_REAL_LIBEGL="$found"
+  else
+    echo "  NENHUM driver EGL real encontrado! shim vai falhar em abrir"
+  fi
+  # GLESv2 tambem:
+  for pat in /usr/lib/*/libGLESv2.so* /usr/lib/libGLESv2.so* \
+             /usr/lib/egl/libGLES* /usr/lib/libIMG*GLES* /usr/lib/hwdefault*/*/libGLESv2*; do
+    for f in $pat; do
+      [ -f "$f" ] || continue
+      echo "  GLESv2: $f"
+      export ULTRAKILL_REAL_LIBGLESV2="$f"
+      break 2
+    done
+  done
+} 2>&1 | tee -a "$LOG"
+
+# Detecta o SDL_VIDEODRIVER adequado. Se ninguem setou, tenta kmsdrm
+# (o que SpruceOS usa). Se falhar, tenta fbcon, depois offscreen.
+: "${SDL_VIDEODRIVER:=}"
+if [ -z "$SDL_VIDEODRIVER" ]; then
+  if [ -e /dev/dri/card0 ] || [ -e /dev/dri/renderD128 ]; then
+    export SDL_VIDEODRIVER=kmsdrm
+  elif [ -e /dev/fb0 ]; then
+    export SDL_VIDEODRIVER=fbcon
+  else
+    export SDL_VIDEODRIVER=offscreen
+  fi
+fi
+echo "SDL_VIDEODRIVER=$SDL_VIDEODRIVER  ULTRAKILL_REAL_LIBEGL=${ULTRAKILL_REAL_LIBEGL:-<nenhum>}" >> "$LOG"
+
 # ---------------------------------------------------------------- 7. EXEC
 BIN=""
 for c in "$GD/bin/ultrakill-arm64" "$GD/bin/ultrakill-arm" "$GD/bin/ultrakill"; do

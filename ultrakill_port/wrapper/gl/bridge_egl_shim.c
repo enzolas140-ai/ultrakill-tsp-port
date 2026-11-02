@@ -145,6 +145,7 @@ static struct shim_native_window *current_anw(void) {
 /* EGL 1.0 / 1.1 */
 FWD(const char*, eglQueryString,
     (EGLDisplay dpy, int name), (dpy, name), (const char*)0)
+FWD(void*, eglGetProcAddress, (const char *name), (name), (void*)0)
 FWD(EGLBoolean, eglInitialize,
     (EGLDisplay dpy, EGLint *mj, EGLint *mn), (dpy, mj, mn), EGL_FALSE)
 FWD(EGLBoolean, eglTerminate, (EGLDisplay dpy), (dpy), EGL_FALSE)
