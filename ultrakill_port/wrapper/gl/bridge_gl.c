@@ -12,6 +12,7 @@
  * Backend de display: no TSP/SpruceOS o compositor é X11 (Xweston) ou
  * Wayland, escolhido pelo arranque. SDL2 auto-detecta. Se você ver
  * "Cannot open display", teste `SDL_VIDEODRIVER=kmsgrab` ou `x11`. */
+#include <android_shim.h>
 #include <bridge_gl.h>
 #include <bridge_unity.h>
 #include "shim_native_window.h"
@@ -104,11 +105,11 @@ static int load_egl(void) {
     fprintf(stderr, "  defina ULTRAKILL_REAL_LIBEGL=/caminho/absoluto/libEGL.so.1\n");
     return -1;
   }
-#define LOAD(name) do { p_##name = (PFN_##name)dlsym(h, "egl" #name + 4); \
-                        if (!p_##name) { fprintf(stderr, "dlsym egl%s falhou no driver real\n", #name); return -2; } } while(0)
-  LOAD(GetDisplay); LOAD(Initialize); LOAD(ChooseConfig);
-  LOAD(CreateContext); LOAD(CreateWindowSurface); LOAD(MakeCurrent);
-  LOAD(SwapBuffers); LOAD(BindAPI); LOAD(QueryString); LOAD(GetError);
+#define LOAD(fn) do { p_##fn = (PFN_##fn)dlsym(h, #fn); \\
+                      if (!p_##fn) { fprintf(stderr, "dlsym %s falhou no driver real\\n", #fn); return -2; } } while(0)
+  LOAD(eglGetDisplay); LOAD(eglInitialize); LOAD(eglChooseConfig);
+  LOAD(eglCreateContext); LOAD(eglCreateWindowSurface); LOAD(eglMakeCurrent);
+  LOAD(eglSwapBuffers); LOAD(eglBindAPI); LOAD(eglQueryString); LOAD(eglGetError);
 #undef LOAD
   return 0;
 }
