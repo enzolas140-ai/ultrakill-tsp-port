@@ -217,25 +217,56 @@ int main(int argc, char **argv, char **envp) {
       shim_jni_dump_natives();
 
       const char *UP = "com/unity3d/player/UnityPlayer";
-      /* Ordem que a UnityPlayer.java roda o boot: */
-      static const char *seq[] = {
-        "nativePrepare", "nativeSetup", "nativePreInit", "nativeInit",
-        "nativeAudioInit", "nativeVideoInit", "nativeStartup", "nativeRun",
-        NULL
-      };
-      typedef void (*Native_void)(JNIEnv *, void *, ...);
-      typedef void (*Native_int)(JNIEnv *, void *, int);
-      for (int i = 0; seq[i]; i++) {
-        void *fn = shim_jni_find_native(UP, seq[i]);
-        if (!fn) continue;
-        const char *sig = shim_jni_native_sig(UP, seq[i]);
-        fprintf(stderr, "chamando %s (%s)\n", seq[i], sig ? sig : "?");
-        if (sig && strstr(sig, "I"))       ((Native_int)fn)(env, NULL, 0);
-        else                               ((Native_void)fn)(env, NULL);
+      /* Mapeado pelo proprio JNI_OnLoad (log do device): nao ha
+       * nativeSetup/nativeRun neste Unity 2019.4 Android. O que a
+       * UnityPlayer.java faz apos registrar os natives e:
+       *   initJni(context)  -> cria engine + main thread
+       *   nativeResume()    -> reativa após pause
+       *   loop: nativeRender()Z  (retorna !QuitRequested)
+       *         + window focus etc.
+       * Emulamos essa sequencia AQUI na thread principal (GL context ja
+       * current nela; Unity cria o próprio EGLSurface via nosso shim). */
+      typedef int (*Fn_Z_noargs)(JNIEnv *, void *);
+      typedef void (*Fn_V_noargs)(JNIEnv *, void *);
+      typedef void (*Fn_V_ctx)(JNIEnv *, void *, void *);
+      typedef void (*Fn_V_bool)(JNIEnv *, void *, unsigned char);
+
+      void *fnInit   = shim_jni_find_native(UP, "initJni");
+      void *fnResume = shim_jni_find_native(UP, "nativeResume");
+      void *fnRender = shim_jni_find_native(UP, "nativeRender");
+      void *fnFocus  = shim_jni_find_native(UP, "nativeFocusChanged");
+      void *fnDone   = shim_jni_find_native(UP, "nativeDone");
+      void *fnLowMem = shim_jni_find_native(UP, "nativeLowMemory");
+      (void)fnLowMem;
+
+      /* Objeto-Contexto fake (ref do nosso pool; initJni so quer um
+       * jobject pra cachar o Context). */
+      void *ctx = (*env)->FindClass(env, "android/content/res/UnityPlayerActivity");
+
+      if (fnInit)   { fprintf(stderr, "chamando initJni(ctx)\n");
+                      ((Fn_V_ctx)fnInit)(env, NULL, ctx); }
+      if (fnFocus)  { fprintf(stderr, "chamando nativeFocusChanged(1)\n");
+                      ((Fn_V_bool)fnFocus)(env, NULL, 1); }
+      if (fnResume) { fprintf(stderr, "chamando nativeResume()\n");
+                      ((Fn_V_noargs)fnResume)(env, NULL); }
+
+      if (fnRender) {
+        fprintf(stderr, ">> loop nativeRender comecando\n");
+        long frames = 0;
+        while (frames < 600) {   /* ~10 min de teste; quit via nativeDone */
+          int cont = ((Fn_Z_noargs)fnRender)(env, NULL);
+          frames++;
+          if (frames % 300 == 0)
+            fprintf(stderr, "[render] frames=%ld cont=%d\n", frames, cont);
+          if (!cont) { fprintf(stderr, "[render] QuitRequested -> sai\n"); break; }
+          usleep(16000);   /* ~60fps; gamepad/teclado via input thread */
+        }
+        fprintf(stderr, "[render] loop encerrado apos %ld frames\n", frames);
+      } else {
+        fprintf(stderr, "AVISO: nativeRender nao registrado; esperando 30s\n");
+        for (volatile int s = 0; s < 3000; s++) { usleep(10000); }
       }
-      /* Se nada rodou, o loop pode vir numa thread spawnada pelo OnLoad. */
-      fprintf(stderr, ">> pos-JNI_OnLoad (aguardando render thread)\n");
-      for (volatile int s = 0; s < 300; s++) { usleep(10000); } /* 3s de espera */
+      if (fnDone) { fprintf(stderr, "chamando nativeDone()\n"); ((Fn_Z_noargs)fnDone)(env, NULL); }
       return 0;
     }
     ANativeActivity_onCreate_fn oncreate =
