@@ -441,9 +441,12 @@ static pthread_mutex_t env_mtx = PTHREAD_MUTEX_INITIALIZER;
 static jint JNICALL vm_AttachCurrentThread(JavaVM *vm, void **penv, void *args) {
   (void)vm; (void)args;
   if (!tls_env) {
-    JNIEnv *e = calloc(1, sizeof(*e));
-    *(const void**)e = &g_env_vtable;   /* JNIEnv->functions = vtable (campo 0) */
-    tls_env = e;
+    /* IMPORTANTE: o typedef e `typedef struct JNINativeInterface_ JNIEnv;`,
+     * entao `JNIEnv *` ja e um ponteiro para a struct vtable inteira.
+     * Antigamente eu fazia calloc + escrevia endereco da vtable em offset 0,
+     * mas isso fazia env->FindClass ler offset ~40 (calloc'd zero) = NULL
+     * = SIGSEGV ao chamar. Agora apontamos direto p/ a estatica. */
+    tls_env = (JNIEnv*)&g_env_vtable;
   }
   if (penv) *penv = tls_env;
   return JNI_OK;
@@ -466,14 +469,8 @@ static const struct JNIInvokeInterface_ g_vm_vtable = {
 
 __attribute__((visibility("default")))
 JavaVM *shim_jni_get_vm(void) {
-  static int once = 0;
-  pthread_mutex_lock(&env_mtx);
-  if (!once) {
-    *(const void**)&g_vm = &g_vm_vtable;   /* JavaVM->functions */
-    once = 1;
-  }
-  pthread_mutex_unlock(&env_mtx);
-  return &g_vm;
+  /* Retorna a propria vtable como JavaVM* (JavaVM = struct JNIInvokeInterface_) */
+  return (JavaVM*)&g_vm_vtable;
 }
 
 __attribute__((visibility("default")))
