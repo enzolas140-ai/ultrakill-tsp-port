@@ -33,22 +33,30 @@ jobs:
           sudo apt-get install -y --no-install-recommends \
             xvfb x11-utils imagemagick xterm \
             libgl1 libglx-mesa0 libegl1 libgles2 \
-            libsdl2-2.0-0 unzip
+            libsdl2-2.0-0 libsdl2-dev unzip build-essential cmake
           # llvmpipe garante GL 3.x por software via mesa
           grep -i -m1 'model name' /proc/cpuinfo || true
           python3 -c "print('ram gb', __import__('os').sysconf(__import__('os').SC_PHYS_PAGES)*4096/1e9)"
 
+      - name: build wrapper (stubs + bridge)
+        working-directory: ultrakill_port/wrapper
+        run: |
+          ./build.sh arm64
+          ls -la ../libs/arm64
+
       - name: fetch payload from release
         run: |
           set -e
-          tag=payload
-          gh release download $tag -R $GITHUB_REPOSITORY -p 'lab-payload.tar.gz' -p 'ULTRADROID.apk' || {
-            echo "::error::release 'payload' com lab-payload.tar.gz + ULTRADROID.apk nao encontrada"
-            exit 1
-          }
+          gh release download payload -R $GITHUB_REPOSITORY -p 'lab-payload.tar.gz'
           tar xzf lab-payload.tar.gz -C ultrakill_port
+          # SDL2 real do apt (com X11+GL) no lugar do blob portmaster
+          SDL=$(dpkg -L libsdl2-2.0-0 | grep -m1 'libSDL2-2.0.so.0$' || true)
+          echo "SDL2 do sistema: $SDL"
+          ln -sf "$SDL" ultrakill_port/libs/arm64/libSDL2-2.0.so.0
+          ln -sf "$SDL" ultrakill_port/libs/arm64/libSDL2-2.0.so
           ls -la ultrakill_port/libs/arm64 | head -30
           ls -la ultrakill_port/gamedata/lib/arm64-v8a
+          ls -la ultrakill_port/gamedata/aa/Android | head -10
         env:
           GH_TOKEN: ${{ github.token }}
 
