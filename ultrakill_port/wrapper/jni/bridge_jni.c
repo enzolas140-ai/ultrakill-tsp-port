@@ -491,21 +491,20 @@ static const struct JNINativeInterface_ g_env_vtable = {
 };
 
 /* -------- JavaVM + TLS env -------- */
-static JavaVM g_vm;
-static __thread JNIEnv *tls_env = NULL;
-static pthread_mutex_t env_mtx = PTHREAD_MUTEX_INITIALIZER;
+/* -------- celulas do ABI (env -> cell -> vtable) --------
+ * O libunity.so compilado em C++ faz `env->functions->GetVersion(env)`, ou
+ * seja le *(env) esperando o ENDERECO da vtable. Se entregarmos a propria
+ * vtable (env = &g_env_vtable), ele le o 1o campo (reserved0 = NULL) e entao
+ * deref [NULL+0x20] -> SIGSEGV (foi o crash em JNI_OnLoad+0x30!). Entregamos
+ * SEMPRE &cell, onde cell guarda o ponteiro da tabela. */
+static const struct JNINativeInterface_  *g_env_cell;
+static const struct JNIInvokeInterface_  *g_vm_cell;
+static void jni_ensure_cells(void);
 
 static jint JNICALL vm_AttachCurrentThread(JavaVM *vm, void **penv, void *args) {
   (void)vm; (void)args;
-  if (!tls_env) {
-    /* IMPORTANTE: o typedef e `typedef struct JNINativeInterface_ JNIEnv;`,
-     * entao `JNIEnv *` ja e um ponteiro para a struct vtable inteira.
-     * Antigamente eu fazia calloc + escrevia endereco da vtable em offset 0,
-     * mas isso fazia env->FindClass ler offset ~40 (calloc'd zero) = NULL
-     * = SIGSEGV ao chamar. Agora apontamos direto p/ a estatica. */
-    tls_env = (JNIEnv*)&g_env_vtable;
-  }
-  if (penv) *penv = tls_env;
+  jni_ensure_cells();
+  if (penv) *penv = (void *)&g_env_cell;   /* ponteiro para a CELULA */
   return JNI_OK;
 }
 static jint JNICALL vm_DetachCurrentThread(JavaVM *vm) { (void)vm; return JNI_OK; }
@@ -524,20 +523,22 @@ static const struct JNIInvokeInterface_ g_vm_vtable = {
   .AttachCurrentThreadAsDaemon = vm_AttachCurrentThreadAsDaemon,
 };
 
+static void jni_ensure_cells(void) {
+  if (!g_env_cell) g_env_cell = &g_env_vtable;
+  if (!g_vm_cell)  g_vm_cell  = &g_vm_vtable;
+}
+
 __attribute__((visibility("default")))
 JavaVM *shim_jni_get_vm(void) {
-  /* Retorna a propria vtable como JavaVM* (JavaVM = struct JNIInvokeInterface_) */
-  return (JavaVM*)&g_vm_vtable;
+  jni_ensure_cells();
+  return (JavaVM *)&g_vm_cell;   /* cell**, nao vtable* */
 }
 
 __attribute__((visibility("default")))
 JNIEnv *shim_jni_new_env_for_thread(const char *name) {
   (void)name;
-  if (!tls_env) {
-    void *e;
-    vm_AttachCurrentThread(&g_vm, &e, NULL);
-  }
-  return tls_env;
+  jni_ensure_cells();
+  return (JNIEnv *)&g_env_cell;   /* cell**, nao vtable* */
 }
 
 __attribute__((visibility("default")))
