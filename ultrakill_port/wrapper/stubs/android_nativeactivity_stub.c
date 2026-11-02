@@ -154,3 +154,100 @@ __attribute__((visibility("default")))
 int32_t ANativeWindow_getHeight(ANativeWindow *w) { (void)w; return 720; }
 __attribute__((visibility("default")))
 int32_t ANativeWindow_getFormat(ANativeWindow *w) { (void)w; return 1; /* RGBA_8888 */ }
+
+/* ANativeWindow_fromSurface: no bridge nao ha Surface real; devolvemos o
+ * shim ANativeWindow ja em uso (ou NULL). Unity so usa p/ obter a window a
+ * partir do Java Surface - noi ignoramos porque o EGL surface ja esta
+ * pre-criado no shim_gl. */
+__attribute__((visibility("default")))
+ANativeWindow *ANativeWindow_fromSurface(void *env, void *surface) {
+  (void)env; (void)surface;
+  extern ANativeWindow *ANativeWindow_get_shim(void);
+  return ANativeWindow_get_shim();
+}
+__attribute__((visibility("default")))
+int32_t ANativeWindow_setBuffersGeometry(ANativeWindow *w, int32_t fw,
+                                         int32_t fh, int32_t fmt) {
+  (void)w; (void)fw; (void)fh; (void)fmt; return 0;
+}
+
+/* -------- __system_property_* (Bionic libc) --------
+ * Unity lê ro.build.version.sdk, dalvik.vm.*, etc. Devolvemos vazio/NULL;
+ * os callers toleram. struct prop_info e opaca pra nos. */
+__attribute__((visibility("default")))
+const void *__system_property_find(const char *name) { (void)name; return NULL; }
+__attribute__((visibility("default")))
+int __system_property_get(const char *name, char *value) {
+  (void)name;
+  if (value) value[0] = 0;
+  return 0;   /* strlen of empty value */
+}
+__attribute__((visibility("default")))
+int __system_property_read(const void *pi, char *name, char *value) {
+  (void)pi;
+  if (name) name[0] = 0;
+  if (value) value[0] = 0;
+  return 0;
+}
+__attribute__((visibility("default")))
+const char *__system_property_find_nth(unsigned i) { (void)i; return NULL; }
+__attribute__((visibility("default")))
+unsigned __system_property_serial(const void *pi) { (void)pi; return 0; }
+__attribute__((visibility("default")))
+void *__system_property_wait_any(void) { return NULL; }
+
+/* android_set_abort_message: noop */
+__attribute__((visibility("default")))
+void android_set_abort_message(const char *msg) { (void)msg; }
+
+/* -------- ASensorManager / ASensorEventQueue (acelerometro) --------
+ * ULTRAKILL nao usa sensor, mas libunity.so importa os simbolos -> precisa
+ * existir pra RTLD_LAZY nao explodir quando o init tocar neles. Devolve
+ * NULL/0; Unity trata ausencia de sensor. */
+__attribute__((visibility("default")))
+void *ASensorManager_getInstance(void) { return NULL; }
+__attribute__((visibility("default")))
+void *ASensorManager_getInstanceForPackage(const char *p) { (void)p; return NULL; }
+__attribute__((visibility("default")))
+int ASensorManager_getSensorList(const void *m, const void **list) {
+  (void)m; if (list) *list = NULL; return 0;
+}
+__attribute__((visibility("default")))
+const void *ASensorManager_getDefaultSensor(const void *m, int type) {
+  (void)m; (void)type; return NULL;
+}
+__attribute__((visibility("default")))
+void *ASensorManager_createEventQueue(const void *m, void *looper,
+                                      int ident, void *cb, void *data) {
+  (void)m; (void)looper; (void)ident; (void)cb; (void)data; return NULL;
+}
+__attribute__((visibility("default")))
+int ASensorManager_destroyEventQueue(const void *m, void *q) {
+  (void)m; (void)q; return 0;
+}
+__attribute__((visibility("default")))
+int ASensorEventQueue_enableSensor(void *q, const void *s) { (void)q; (void)s; return 0; }
+__attribute__((visibility("default")))
+int ASensorEventQueue_disableSensor(void *q, const void *s) { (void)q; (void)s; return 0; }
+__attribute__((visibility("default")))
+int ASensorEventQueue_setEventRate(void *q, const void *s, int32_t us) { (void)q; (void)s; (void)us; return 0; }
+__attribute__((visibility("default")))
+int ASensorEventQueue_hasEvents(void *q) { (void)q; return 0; }
+__attribute__((visibility("default")))
+ssize_t ASensorEventQueue_getEvents(void *q, void *ev, size_t n) { (void)q; (void)ev; (void)n; return 0; }
+__attribute__((visibility("default")))
+const char *ASensor_getName(const void *s) { (void)s; return ""; }
+__attribute__((visibility("default")))
+const char *ASensor_getVendor(const void *s) { (void)s; return ""; }
+__attribute__((visibility("default")))
+int ASensor_getType(const void *s) { (void)s; return 0; }
+__attribute__((visibility("default")))
+float ASensor_getResolution(const void *s) { (void)s; return 0.f; }
+__attribute__((visibility("default")))
+int ASensor_getMinDelay(const void *s) { (void)s; return 0; }
+__attribute__((visibility("default")))
+int ASensor_getMaxRange(const void *s) { (void)s; return 0; }
+__attribute__((visibility("default")))
+void ASensor_setAcquisitionRate(const void *s, int r) { (void)s; (void)r; }
+__attribute__((visibility("default")))
+void ASensor_setMaximumReportLatency(const void *s, int l) { (void)s; (void)l; }

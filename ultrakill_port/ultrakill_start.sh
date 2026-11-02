@@ -410,6 +410,11 @@ echo "candidatos SDL_VIDEODRIVER a testar: $CANDIDATES"
 echo "env: WAYLAND_DISPLAY=${WAYLAND_DISPLAY:-<unset>}  DISPLAY=${DISPLAY:-<unset>}  XDG_RUNTIME_DIR=${XDG_RUNTIME_DIR:-<unset>}"
 
 # ---------------------------------------------------------------- 7. EXEC
+# Diz ao bridge o caminho ABSOLUTO do libunity.so (evita qualquer ambiguidade
+# de busca no LD_LIBRARY_PATH).
+for lu in "$GD/lib/arm64-v8a/libunity.so" "$GD/lib/armeabi-v7a/libunity.so"; do
+  if [ -f "$lu" ]; then export ULTRAKILL_LIBUNITY="$lu"; echo "ULTRAKILL_LIBUNITY=$lu"; break; fi
+done
 BIN=""
 for c in "$GD/bin/ultrakill-arm64" "$GD/bin/ultrakill-arm" "$GD/bin/ultrakill"; do
   [ -x "$c" ] && BIN="$c" && break

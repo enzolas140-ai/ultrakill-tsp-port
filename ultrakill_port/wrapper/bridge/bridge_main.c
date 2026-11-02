@@ -49,12 +49,16 @@ static void exe_dir(char *out, size_t n) {
 
 static void *try_dlopen(const char *const *candidates, int n, char *err, size_t elen) {
   if (err && elen) err[0] = 0;
+  /* RTLD_LAZY: libunity.so (Bionic) importa ~34 simbolos Android que ainda
+   * podem faltar. Com RTLD_NOW o dlopen falha no PRIMEIRO ausente antes de
+   * qualquer coisa rodar. Com RTLD_LAZY a lib carrega e so explode (via nosso
+   * guard SIGSEGV) quando um simbolo realmente for chamado - ai vemos qual. */
   for (int i = 0; i < n; i++) {
     dlerror();   /* limpa estado anterior */
-    void *h = dlopen(candidates[i], RTLD_NOW | RTLD_GLOBAL);
+    void *h = dlopen(candidates[i], RTLD_LAZY | RTLD_GLOBAL);
     if (h) return h;
     const char *e = dlerror();   /* UMA so chamada - dlerror() consome a msg */
-    if (err && elen)
+    if (err && elen && err[0] == 0)   /* guarda o PRIMEIRO erro, nao o ultimo */
       snprintf(err, elen, "dlopen(\"%s\"): %s", candidates[i],
                e ? e : "(sem mensagem)");
   }
@@ -116,13 +120,15 @@ int main(int argc, char **argv, char **envp) {
   /* (O ANativeWindow em si passa via eglCreateWindowSurface interceptado.) */
 
   /* ---- 4. dlopen libunity.so ---- */
+  const char *absli = getenv("ULTRAKILL_LIBUNITY");
   const char *cands[] = {
+    absli,                                      /* caminho absoluto do launcher */
     "libunity.so",                              /* achado via LD_LIBRARY_PATH */
     "./libunity.so",
     NULL
   };
   char err[256] = "";
-  void *hu = try_dlopen(cands, 2, err, sizeof err);
+  void *hu = try_dlopen(cands, absli ? 3 : 2, err, sizeof err);
   if (!hu) {
     fprintf(stderr, "dlopen libunity.so falhou: %s\n", err);
     fprintf(stderr, "LD_LIBRARY_PATH=%s\n", getenv("LD_LIBRARY_PATH") ? getenv("LD_LIBRARY_PATH") : "(unset)");
