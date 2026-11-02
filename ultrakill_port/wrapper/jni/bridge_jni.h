@@ -67,7 +67,11 @@ enum { JNI_COMMIT = 1, JNI_ABORT = 2 };
  * Ordem exata do jni.h oficial. reserved0..3 = null (4 slots). Depois
  * ~229 funções. Só declaramos as que implementamos + placeholders para
  * preservar offsets. */
-typedef struct JNINativeInterface_ JNIEnv;
+/* ABI JNI padrao (art/libdvm + NDK): o que circula e um PONTEIRO PARA UMA
+ * CELULA que contem o endereco da vtable. Em C++ _JNIEnv tem como 1o membro
+ * `const JNINativeInterface_* functions`; em C usa-se `(*env)->X(env,...)`.
+ * Ambos exigem: env -> cell -> vtable (duplo apontamento). */
+typedef const struct JNINativeInterface_ *JNIEnv;
 typedef const struct JNINativeInterface_ *JNIEnvPtr;
 
 struct JNINativeInterface_ {
@@ -337,7 +341,7 @@ struct JNINativeInterface_ {
 };
 
 /* -------- JavaVM (JNIInvokeInterface_) -------- */
-typedef struct JNIInvokeInterface_ JavaVM;
+typedef const struct JNIInvokeInterface_ *JavaVM;
 typedef const struct JNIInvokeInterface_ *JavaVMPtr;
 
 struct JNIInvokeInterface_ {
