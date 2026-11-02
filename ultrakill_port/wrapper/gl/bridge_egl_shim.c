@@ -93,10 +93,10 @@ static void ensure_real(void) {
   if (g_loaded_ok) return;
   pthread_mutex_lock((pthread_mutex_t*)&g_once);
   if (g_loaded_ok) { pthread_mutex_unlock((pthread_mutex_t*)&g_once); return; }
-  /* Lista de caminhos - NUNCA inclui "libEGL.so" (sem .1) para não
-   * recursar em nós mesmos. */
+  /* Lista de caminhos - só paths ABSOLUTOS. Se colocássemos
+   * "libEGL.so.1" (sem caminho) o loader pode achar NOSSO shim
+   * (copiado como libEGL.so.1) e recursar em ensure_real. */
   static const char *paths[] = {
-    "libEGL.so.1",
     "/usr/lib/libEGL.so.1",
     "/usr/lib/aarch64-linux-gnu/libEGL.so.1",
     "/usr/lib/arm-linux-gnueabihf/libEGL.so.1",
