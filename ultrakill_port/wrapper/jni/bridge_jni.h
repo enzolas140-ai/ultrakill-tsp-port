@@ -22,12 +22,13 @@ extern "C" {
 #endif
 
 /* -------- typedefs básicos (jni.h) -------- */
+typedef unsigned char jboolean;
 typedef int8_t   jbyte;
 typedef uint16_t jchar;
 typedef int16_t  jshort;
 typedef int32_t  jint;
 typedef int64_t  jlong;
-typedef jfloat   _jfloat_placeholder;  /* evitamos incluir <float.h> - jfloat= float */
+// jfloat definido logo abaixo; placeholder removido
 typedef float    jfloat;
 typedef double   jdouble;
 typedef jint     jsize;
