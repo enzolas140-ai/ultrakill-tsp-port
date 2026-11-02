@@ -26,7 +26,11 @@
  *   é mais global do que queremos (afetaria o compositor também). Mantemos
  *   o shim com escopo restrito ao processo do jogo.
  */
+#define _GNU_SOURCE   /* RTLD_DEFAULT no glibc <= 2.33 (bullseye/ArkOS) */
 #include <dlfcn.h>
+#ifndef RTLD_DEFAULT
+#define RTLD_DEFAULT ((void *)0)
+#endif
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -100,6 +104,7 @@ static void ensure_real(void) {
     "/usr/lib/libEGL.so.1",
     "/usr/lib/aarch64-linux-gnu/libEGL.so.1",
     "/usr/lib/arm-linux-gnueabihf/libEGL.so.1",
+    "/usr/lib/x86_64-linux-gnu/libEGL.so.1",
     "/usr/lib64/libEGL.so.1",
     "/usr/local/lib/libEGL.so.1",
     "/vendor/lib/egl/libEGLPOWER.so",

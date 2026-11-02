@@ -4,6 +4,7 @@
  * isto o jogo SIGSEGV no primeiro AL_LOG. */
 #include <android_shim.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 static const char *lvl(int prio) {
