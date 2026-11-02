@@ -33,7 +33,18 @@ jobs:
         # glibc ~2.33 -> ate o tee/grep do sistema quebrava com LD_PRELOAD
         # do shim. Bullseye exporta glibc 2.31: roda em QUALQUER device.
         run: |
-          docker run --rm -v "$PWD:/src" -w /src/ultrakill_port/wrapper public.ecr.aws/debian/debian:bullseye-slim bash -ec '
+          # Docker Hub anonimo da "toomanyrequests" nos runners ARM -> espelho
+          # gcr + tentativas com backoff.
+          echo '{"registry-mirrors":["https://mirror.gcr.io"]}' | sudo tee /etc/docker/daemon.json
+          sudo systemctl restart docker
+          IMG=debian:bullseye-slim
+          ok=0
+          for i in 1 2 3 4 5; do
+            if docker pull -q $IMG; then ok=1; break; fi
+            sleep $((i*20))
+          done
+          [ "$ok" = 1 ] || { echo "falhou pull $IMG"; docker pull -q public.ecr.aws/debian/debian:bullseye-slim && IMG=public.ecr.aws/debian/debian:bullseye-slim; }
+          docker run --rm -v "$PWD:/src" -w /src/ultrakill_port/wrapper "$IMG" bash -ec '
             apt-get update
             apt-get install -y --no-install-recommends \
               build-essential cmake pkg-config ninja-build \
