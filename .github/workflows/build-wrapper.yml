@@ -1,0 +1,102 @@
+name: build wrapper (arm64)
+
+# Gatilha:
+#   - push em qualquer branch com .github/workflows/build-wrapper.yml + ultrakill_port/
+#   - disparo manual via Actions tab -> Build wrapper -> Run workflow
+on:
+  push:
+    paths:
+      - 'ultrakill_port/wrapper/**'
+      - 'ultrakill_port/CMakeLists.txt'
+      - '.github/workflows/build-wrapper.yml'
+  workflow_dispatch:
+  release:
+    types: [created]
+
+permissions:
+  contents: read
+
+jobs:
+  build-arm64:
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: install toolchain + SDL2 dev (arm64)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential cmake pkg-config ninja-build \
+            libsdl2-dev libegl1-mesa-dev libgles-dev \
+            libglvnd-dev
+          # checagem: as libs tem que ser aarch64
+          dpkg-architecture -qDEB_HOST_ARCH
+
+      - name: configure + build
+        working-directory: ultrakill_port/wrapper
+        run: |
+          ./build.sh arm64
+          # output esperado:
+          #   ../libs/arm64/{liblog,libandroid,libOpenSLES,libmediandk,libEGL}.so
+          #   ../gamedata/bin/ultrakill
+          #   build-arm64/{input_probe,symbol_probe}
+
+      - name: smoke-test input_probe (headless)
+        working-directory: ultrakill_port/wrapper
+        run: |
+          export LD_LIBRARY_PATH="$(cd ../libs/arm64 && pwd):${LD_LIBRARY_PATH}"
+          ./build-arm64/input_probe --headless --skip-real-loop --libdir ../libs/arm64
+        # NAO deve crashar; exit code 0 = ABI/exports/round-trip todos OK
+
+      - name: collect artifacts
+        working-directory: ultrakill_port
+        run: |
+          mkdir -p /tmp/out
+          cp -v libs/arm64/*.so                        /tmp/out/
+          cp -v gamedata/bin/ultrakill                 /tmp/out/
+          cp -v wrapper/build-arm64/input_probe        /tmp/out/
+          cp -v wrapper/build-arm64/symbol_probe       /tmp/out/ 2>/dev/null || true
+          ls -la /tmp/out
+
+      - name: tar for SD drop-in
+        run: |
+          cd ultrakill_port
+          tar czf ../ultrakill-built-arm64.tar.gz \
+            -C .. --transform='flags=r;s|^|ultrakill/|' \
+            ultrakill_port/libs/arm64/*.so \
+            ultrakill_port/gamedata/bin/ultrakill \
+            ultrakill_port/wrapper/build-arm64/input_probe \
+            ultrakill_port/wrapper/build-arm64/symbol_probe 2>/dev/null \
+          || tar czf ../ultrakill-built-arm64.tar.gz \
+            libs/arm64/*.so gamedata/bin/ultrakill \
+            wrapper/build-arm64/input_probe wrapper/build-arm64/symbol_probe
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ultrakill-arm64-binaries
+          path: |
+            ultrakill-built-arm64.tar.gz
+            ultrakill_port/libs/arm64/*.so
+            ultrakill_port/gamedata/bin/ultrakill
+          retention-days: 30
+
+  build-armv7:
+    # fallback: se o TSP rodar userspace 32-bit, este job gera libs/armv7
+    if: ${{ false }}   # descomente / mude pra true pra habilitar
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: install armhf cross toolchain
+        run: |
+          sudo dpkg --add-architecture armhf
+          sudo apt update
+          sudo apt install -y build-essential cmake pkg-config \
+            gcc-arm-linux-gnueabihf g++-arm-linux-gnueabihf \
+            libsdl2-dev:armhf
+      - name: build
+        working-directory: ultrakill_port/wrapper
+        run: ./build.sh armv7 --cross
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ultrakill-armv7-binaries
+          path: ultrakill_port/libs/armv7/*.so
