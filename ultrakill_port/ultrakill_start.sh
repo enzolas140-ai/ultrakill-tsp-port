@@ -300,19 +300,27 @@ export ULTRAKILL_PERSIST="$STATEDIR"
   done
 } 2>&1 | tee -a "$LOG"
 
-# Detecta o SDL_VIDEODRIVER adequado. Se ninguem setou, tenta kmsdrm
-# (o que SpruceOS usa). Se falhar, tenta fbcon, depois offscreen.
-: "${SDL_VIDEODRIVER:=}"
-if [ -z "$SDL_VIDEODRIVER" ]; then
-  if [ -e /dev/dri/card0 ] || [ -e /dev/dri/renderD128 ]; then
-    export SDL_VIDEODRIVER=kmsdrm
-  elif [ -e /dev/fb0 ]; then
-    export SDL_VIDEODRIVER=fbcon
-  else
-    export SDL_VIDEODRIVER=offscreen
+# Detecta SDL_VIDEODRIVER. Em vez de chutar, lista o que o SDL2 do
+# SpruceOS realmente suporta (via strings na lib) e testa em ordem.
+{
+  SDL_LIB=$(find /usr/lib -maxdepth 3 -name 'libSDL2-2.0.so*' -o -name 'libSDL2.so*' 2>/dev/null | head -1)
+  echo "== SDL2 encontrado: ${SDL_LIB:-<nenhum>} =="
+  if [ -n "$SDL_LIB" ] && command -v strings >/dev/null; then
+    echo "  drivers compilados neste SDL2:"
+    strings "$SDL_LIB" | grep -E '^(x11|wayland|kmsdrm|fbcon|directfb|offscreen|dummy|raspberry_pi|android|uikit|cocoa|windows|ps2|vita)$' | sort -u | sed 's/^/    - /'
   fi
+} 2>&1 | tee -a "$LOG"
+
+# Ordem de prioridade: se o display atual for X11 (DISPLAY setado),
+# tenta x11 primeiro. Se for Wayland, wayland. Depois kmsdrm/fbcon
+# (caso SpruceOS em bare-metal). offscreen/dummy no final.
+if [ -n "$DISPLAY" ]; then
+  CANDIDATES="x11 wayland kmsdrm fbcon offscreen dummy"
+elif [ -n "$WAYLAND_DISPLAY" ]; then
+  CANDIDATES="wayland x11 kmsdrm fbcon offscreen dummy"
+else
+  CANDIDATES="kmsdrm fbcon wayland x11 offscreen dummy"
 fi
-echo "SDL_VIDEODRIVER=$SDL_VIDEODRIVER  ULTRAKILL_REAL_LIBEGL=${ULTRAKILL_REAL_LIBEGL:-<nenhum>}" >> "$LOG"
 
 # ---------------------------------------------------------------- 7. EXEC
 BIN=""
@@ -339,10 +347,7 @@ HELP
 fi
 
 echo ">> exec: $BIN (${INT_W}x${INT_H})"
-# SD montado em vfat/exfat pode nao trazer +x. Tenta corrigir, ignora
-# se o filesystem nao suportar chmod.
 chmod +x "$BIN" 2>/dev/null || true
-# se o ELF nao roda do SD (particao noexec), copia p/ /tmp e roda de la
 RUN_BIN="$BIN"
 if ! test -x "$BIN" 2>/dev/null; then
   echo ">> $BIN sem +x, tentando copia p/ /tmp (SD noexec?)"
@@ -350,19 +355,31 @@ if ! test -x "$BIN" 2>/dev/null; then
 fi
 for so in "$SHIMDIR"/lib*.so; do chmod +x "$so" 2>/dev/null; done
 
-if command -v taskset >/dev/null 2>&1; then
-  taskset -c 0-3 "$RUN_BIN" \
-    -screen-width "$INT_W" -screen-height "$INT_H" -screen-fullscreen 1 \
-    -logFile "$STATEDIR/player.log"
-else
-  "$RUN_BIN" \
-    -screen-width "$INT_W" -screen-height "$INT_H" -screen-fullscreen 1 \
-    -logFile "$STATEDIR/player.log"
-fi
-RC=$?
-echo "== exit $RC $(date -Is) =="
+# Tenta cada SDL_VIDEODRIVER em ordem. O bridge retorna 6 quando
+# shim_gl_init falhou; tenta proximo. Qualquer outro exit code
+# (0, SIGSEGV, SIGABRT, 14, ...) para o loop.
+RC=6
+for drv in $CANDIDATES; do
+  echo ">> tentando SDL_VIDEODRIVER=$drv" | tee -a "$LOG"
+  export SDL_VIDEODRIVER="$drv"
+  if command -v taskset >/dev/null 2>&1; then
+    taskset -c 0-3 "$RUN_BIN" \
+      -screen-width "$INT_W" -screen-height "$INT_H" -screen-fullscreen 1 \
+      -logFile "$STATEDIR/player.log"
+  else
+    "$RUN_BIN" \
+      -screen-width "$INT_W" -screen-height "$INT_H" -screen-fullscreen 1 \
+      -logFile "$STATEDIR/player.log"
+  fi
+  RC=$?
+  if [ $RC -ne 6 ] && [ $RC -ne 1 ]; then
+    echo ">> driver $drv deu exit $RC (nao e mais problema de video, para loop)" | tee -a "$LOG"
+    break
+  fi
+  echo ">> driver $drv falhou (exit $RC), proximo..." | tee -a "$LOG"
+done
+echo "== final exit $RC, driver usado: $SDL_VIDEODRIVER $(date -Is) ==" | tee -a "$LOG"
 [ "$RUN_BIN" != "$BIN" ] && rm -f /tmp/ultrakill
-echo "== exit $RC $(date -Is) =="
 
 # ---------------------------------------------------------------- 8. RESTAURA
 [ -w /proc/sys/vm/swappiness ] && echo 60 > /proc/sys/vm/swappiness
