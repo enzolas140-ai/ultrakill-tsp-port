@@ -41,6 +41,8 @@ enum { ALOOPER_PREPARE_ALLOW_NON_CALLBACKS = 1<<0 };
 enum { ALOOPER_EVENT_INPUT = 1<<0, ALOOPER_EVENT_OUTPUT = 1<<1,
        ALOOPER_EVENT_ERROR  = 1<<2, ALOOPER_EVENT_HANGUP = 1<<4,
        ALOOPER_EVENT_INVALID = 1<<8 };
+/* retorno de ALooper_pollAll: */
+enum { ALOOPER_POLL_WAKE = -1, ALOOPER_POLL_CALLBACK = -2, ALOOPER_POLL_TIMEOUT = -3, ALOOPER_POLL_ERROR = -4 };
 typedef int (*ALooper_callbackFunc)(int fd, int events, void *data);
 ALooper *ALooper_prepare(int opts);
 int      ALooper_acquire(ALooper *l);
