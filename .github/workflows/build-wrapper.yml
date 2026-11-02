@@ -22,31 +22,38 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: install toolchain + SDL2 dev (arm64)
+      - name: install toolchain host (so p/ docker)
         run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
-            build-essential cmake pkg-config ninja-build \
-            libsdl2-dev libegl1-mesa-dev libgles-dev \
-            libglvnd-dev
-          # checagem: as libs tem que ser aarch64
-          dpkg-architecture -qDEB_HOST_ARCH
+          # nada a instalar no host alem do docker (pre-instalado no runner arm)
+          dpkg-architecture -qDEB_HOST_ARCH || true
 
-      - name: configure + build
-        working-directory: ultrakill_port/wrapper
+      - name: configure + build (dentro debian:bullseye = glibc 2.31)
+        # IMPORTANTISSIMO: buildar no Ubuntu 24.04 (glibc 2.39) liga os .so
+        # contra GLIBC_2.34 (pthread merged na libc) - e o ArkOS/R36S roda
+        # glibc ~2.33 -> ate o tee/grep do sistema quebrava com LD_PRELOAD
+        # do shim. Bullseye exporta glibc 2.31: roda em QUALQUER device.
         run: |
-          ./build.sh arm64
-          # output esperado:
-          #   ../libs/arm64/{liblog,libandroid,libOpenSLES,libmediandk,libEGL}.so
-          #   ../gamedata/bin/ultrakill
-          #   build-arm64/{input_probe,symbol_probe}
+          docker run --rm -v "$PWD:/src" -w /src/ultrakill_port/wrapper debian:bullseye bash -ec '
+            apt-get update
+            apt-get install -y --no-install-recommends \
+              build-essential cmake pkg-config ninja-build \
+              libsdl2-dev libegl1-mesa-dev libgles-dev libglvnd-dev
+            ./build.sh arm64
+            # zlib fisicamente ausente no ArkOS - embalamos junto (<=2.31)
+            Z=$(ls /usr/lib/aarch64-linux-gnu/libz.so.1* 2>/dev/null | head -1)
+            if [ -n "$Z" ]; then
+              cp -Lv "$Z" /src/ultrakill_port/libs/arm64/libz.so.1
+              cp -v  /src/ultrakill_port/libs/arm64/libz.so.1 /src/ultrakill_port/libs/arm64/libz.so
+            fi
+            # smoke test dentro do MESMO glibc do build
+            export LD_LIBRARY_PATH=/src/ultrakill_port/libs/arm64
+            ./build-arm64/input_probe --headless --skip-real-loop --libdir ../libs/arm64
+          '
+        # (o passo 'smoke-test' antigo roda dentro do container agora)
 
       - name: smoke-test input_probe (headless)
-        working-directory: ultrakill_port/wrapper
-        run: |
-          export LD_LIBRARY_PATH="$(cd ../libs/arm64 && pwd):${LD_LIBRARY_PATH}"
-          ./build-arm64/input_probe --headless --skip-real-loop --libdir ../libs/arm64
-        # NAO deve crashar; exit code 0 = ABI/exports/round-trip todos OK
+        if: ${{ false }}   # done inside the bullseye container above
+        run: true
 
       - name: collect artifacts
         working-directory: ultrakill_port
