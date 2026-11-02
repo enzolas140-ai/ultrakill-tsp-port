@@ -105,8 +105,8 @@ static int load_egl(void) {
     fprintf(stderr, "  defina ULTRAKILL_REAL_LIBEGL=/caminho/absoluto/libEGL.so.1\n");
     return -1;
   }
-#define LOAD(fn) do { p_##fn = (PFN_##fn)dlsym(h, #fn); \\
-                      if (!p_##fn) { fprintf(stderr, "dlsym %s falhou no driver real\\n", #fn); return -2; } } while(0)
+#define LOAD(fn) do { p_##fn = (PFN_##fn)dlsym(h, #fn); \
+                      if (!p_##fn) { fprintf(stderr, "dlsym %s falhou no driver real\n", #fn); return -2; } } while(0)
   LOAD(eglGetDisplay); LOAD(eglInitialize); LOAD(eglChooseConfig);
   LOAD(eglCreateContext); LOAD(eglCreateWindowSurface); LOAD(eglMakeCurrent);
   LOAD(eglSwapBuffers); LOAD(eglBindAPI); LOAD(eglQueryString); LOAD(eglGetError);
