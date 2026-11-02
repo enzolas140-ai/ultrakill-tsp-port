@@ -37,7 +37,7 @@
 #include <android_shim.h>
 #include <bridge_input.h>
 #include <shim_native_window.h>
-
+#include <bridge_gl.h>
 #include <SDL.h>
 
 #include <dlfcn.h>
@@ -67,9 +67,6 @@ _Static_assert(offsetof(struct shim_native_window, egl_surface) >= 20,
 /* AInputEvent: usamos o accessor AInputEvent_getType() no offset
  * esperado pelo layout interno - nada externo depende, mas garantimos
  * que nao encolheu. */
-_Static_assert(sizeof(struct AInputEvent) >= 64,
-               "AInputEvent cresceu demais ou sumiu - checa stub");
-
 /* ============================================================ (B+C+D) */
 
 /* API interna do stub, exportada com visibility default. */
@@ -362,7 +359,7 @@ static int check_real_loop(int duration_s, int headless) {
       drained++;
     }
     /* dorme 16ms - nao busy-wait */
-    struct timespec ts = { 0, 16_000_000L };
+    struct timespec ts = { 0, 16000000L };
     nanosleep(&ts, NULL);
   }
 

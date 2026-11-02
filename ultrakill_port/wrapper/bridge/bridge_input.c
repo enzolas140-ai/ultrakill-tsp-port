@@ -87,8 +87,7 @@ static int32_t map_button(SDL_GameControllerButton b) {
     case SDL_CONTROLLER_BUTTON_B:              return AKEYCODE_BUTTON_A;      /* SDL B == Android A */
     case SDL_CONTROLLER_BUTTON_X:              return AKEYCODE_BUTTON_Y;      /* cross-platform swap */
     case SDL_CONTROLLER_BUTTON_Y:              return AKEYCODE_BUTTON_X;
-    case SDL_CONTROLLER_BUTTON_BACK:
-    case SDL_CONTROLLER_BUTTON_SELECT:         return AKEYCODE_BUTTON_SELECT;
+    case SDL_CONTROLLER_BUTTON_BACK:         return AKEYCODE_BUTTON_SELECT;
     case SDL_CONTROLLER_BUTTON_START:          return AKEYCODE_BUTTON_START;
     case SDL_CONTROLLER_BUTTON_LEFTSTICK:      return AKEYCODE_BUTTON_THUMBL;
     case SDL_CONTROLLER_BUTTON_RIGHTSTICK:     return AKEYCODE_BUTTON_THUMBR;
