@@ -52,10 +52,10 @@ jobs:
         working-directory: ultrakill_port
         run: |
           mkdir -p /tmp/out
-          cp -v libs/arm64/*.so                        /tmp/out/
-          cp -v gamedata/bin/ultrakill                 /tmp/out/
-          cp -v wrapper/build-arm64/input_probe        /tmp/out/
-          cp -v wrapper/build-arm64/symbol_probe       /tmp/out/ 2>/dev/null || true
+          cp -v libs/arm64/*                        /tmp/out/
+          cp -v gamedata/bin/ultrakill             /tmp/out/
+          cp -v wrapper/build-arm64/input_probe     /tmp/out/
+          cp -v wrapper/build-arm64/symbol_probe    /tmp/out/ 2>/dev/null || true
           ls -la /tmp/out
 
       - name: tar for SD drop-in
@@ -76,7 +76,7 @@ jobs:
           name: ultrakill-arm64-binaries
           path: |
             ultrakill-built-arm64.tar.gz
-            ultrakill_port/libs/arm64/*.so
+            ultrakill_port/libs/arm64/**
             ultrakill_port/gamedata/bin/ultrakill
           retention-days: 30
 

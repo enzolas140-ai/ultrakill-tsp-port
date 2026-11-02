@@ -52,15 +52,17 @@ add_library(mediandk_stub SHARED stubs/mediandk_stub.c)
 set_target_properties(mediandk_stub PROPERTIES OUTPUT_NAME "mediandk")
 
 # --------------------------------------------------------------- libEGL.so (shim)
-# Este alvo NAO linka com EGL nenhum - ele eh o EGL. O nome de saida
-# eh exatamente "libEGL.so" (sem SOVERSION), para que o NEEDED do
-# libunity.so caia nele. Ao rodar, dlopen('libEGL.so.1') abre o driver real.
+# Este alvo NAO linka com EGL nenhum - ele eh o EGL. Produzimos como
+# libEGL.so.1 com SONAME batendo - assim o loader deduplica corretamente
+# quando SDL2 faz dlopen("libEGL.so.1") (que e o que ele faz; nao "libEGL.so").
 add_library(egl_shim SHARED gl/bridge_egl_shim.c)
 set_target_properties(egl_shim PROPERTIES
   OUTPUT_NAME "EGL"
-  PREFIX      "lib")
-# Sem SOVERSION de proposito: evita criar symlink libEGL.so.1 -> .so
-# que colidira com o driver real.
+  PREFIX      "lib"
+  SUFFIX      ".so.1")
+target_link_options(egl_shim PRIVATE "-Wl,-soname,libEGL.so.1")
+# Sem SOVERSION de proposito: nao queremos que o cmake crie symlink
+# libEGL.so -> libEGL.so.1 (colidiria com o driver real no search path)
 
 # --------------------------------------------------------------- bridge
 add_executable(bridge

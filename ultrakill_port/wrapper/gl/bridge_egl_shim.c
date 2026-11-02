@@ -145,7 +145,20 @@ static struct shim_native_window *current_anw(void) {
 /* EGL 1.0 / 1.1 */
 FWD(const char*, eglQueryString,
     (EGLDisplay dpy, int name), (dpy, name), (const char*)0)
-FWD(void*, eglGetProcAddress, (const char *name), (name), (void*)0)
+/* -------- eglGetProcAddress interceptado --------
+ * SDL2 chama eglGetProcAddress("eglQueryDevicesEXT") para descobrir ext
+ * functions ANTES de dlsym. Se so encaminharmos ao real, o real nao conhece
+ * nossos sintetizados e retorna NULL -> SDL diz "missing". Resolvemos
+ * dando match das EXT que nos sintetizamos em bridge_egl_shim.c. */
+FWD(void*, eglGetProcAddress_real, (const char *name), (name), (void*)0)
+typedef void (*PFN_eglGetProcAddress_)(const char *);
+__attribute__((visibility("default")))
+void (*eglGetProcAddress(const char *name))(void) {
+  extern void (*shim_eglGetProcAddress_dispatch(const char *));
+  void (*ours)(void) = shim_eglGetProcAddress_dispatch(name);
+  if (ours) return ours;
+  return (void(*)(void))eglGetProcAddress_real(name);
+}
 FWD(EGLBoolean, eglInitialize,
     (EGLDisplay dpy, EGLint *mj, EGLint *mn), (dpy, mj, mn), EGL_FALSE)
 FWD(EGLBoolean, eglTerminate, (EGLDisplay dpy), (dpy), EGL_FALSE)
@@ -355,4 +368,33 @@ __attribute__((destructor))
 static void shim_report(void) {
   if (getenv("ULTRAKILL_EGL_STATS"))
     fprintf(stderr, "shim/libEGL: swaps=%lu\n", g_shim_swaps);
+}
+
+/* -------- dispatcher de EXT sintetizadas --------
+ * Retorna ponteiro p/ nossa funcao quando SDL2 pedir eglGetProcAddress
+ * por uma das EXT que nos implementamos localmente. NULL se nao for
+ * nenhuma delas (ai eglGetProcAddress cai no real). */
+typedef void (*generic_fn)(void);
+__attribute__((visibility("default")))
+generic_fn shim_eglGetProcAddress_dispatch(const char *name) {
+  extern EGLBoolean eglQueryDevicesEXT(EGLint, void**, EGLint*);
+  extern EGLDisplay eglGetPlatformDisplayEXT(EGLenum, void*, const EGLint*);
+  extern EGLBoolean eglQueryDisplayAttribEXT(EGLDisplay, int, EGLint*);
+  extern EGLBoolean eglQueryDeviceStringEXT(void*, const char*);
+  extern EGLSurface eglCreateWindowSurface(EGLDisplay, EGLConfig, void*, const EGLint*);
+  extern EGLBoolean eglDestroySurface(EGLDisplay, EGLSurface);
+  extern EGLBoolean eglSwapBuffers(EGLDisplay, EGLSurface);
+  extern EGLDisplay eglGetDisplay(void*);
+  if (!name) return NULL;
+  #define CMP(s) (strcmp(name, s) == 0)
+  if (CMP("eglQueryDevicesEXT"))       return (generic_fn)eglQueryDevicesEXT;
+  if (CMP("eglGetPlatformDisplayEXT")) return (generic_fn)eglGetPlatformDisplayEXT;
+  if (CMP("eglQueryDisplayAttribEXT")) return (generic_fn)eglQueryDisplayAttribEXT;
+  if (CMP("eglQueryDeviceStringEXT"))  return (generic_fn)eglQueryDeviceStringEXT;
+  if (CMP("eglSwapBuffers"))           return (generic_fn)eglSwapBuffers;
+  if (CMP("eglCreateWindowSurface"))   return (generic_fn)eglCreateWindowSurface;
+  if (CMP("eglDestroySurface"))         return (generic_fn)eglDestroySurface;
+  if (CMP("eglGetDisplay"))             return (generic_fn)eglGetDisplay;
+  #undef CMP
+  return NULL;
 }

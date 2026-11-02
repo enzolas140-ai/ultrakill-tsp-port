@@ -246,6 +246,21 @@ if [ -d "$SHIMDIR" ]; then
   export LD_LIBRARY_PATH="$SHIMDIR${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
   echo "shim dir: $SHIMDIR"
 fi
+# Forca nosso shim libEGL.so.1 a ser o PRIMEIRO EGL carregado no processo.
+# Sem isso, SDL2 pode dlopen('libEGL.so.1') e acabar pegando /usr/lib/libEGL.so.1
+# (driver real, sem EXT_device_enumeration) em vez do nosso shim.
+if [ ! -f "$SHIMDIR/libEGL.so.1" ] && [ -f "$SHIMDIR/libEGL.so" ]; then
+  # SD pode nao ter a versao .1 - cria agora (cp, nao symlink, p/ evitar
+  # problemas em FAT32/exFAT que nao suportam symlink)
+  cp "$SHIMDIR/libEGL.so" "$SHIMDIR/libEGL.so.1" 2>/dev/null || true
+fi
+if [ -f "$SHIMDIR/libEGL.so.1" ]; then
+  export LD_PRELOAD="$SHIMDIR/libEGL.so.1${LD_PRELOAD:+:$LD_PRELOAD}"
+  echo "LD_PRELOAD: $SHIMDIR/libEGL.so.1"
+else
+  echo "AVISO: libEGL.so.1 nao encontrado, nao da pra LD_PRELOAD - SDL pode"
+  echo "       pegar o driver real sem EXT_device_enumeration"
+fi
 # Native Android .so extraidos do APK:
 for d in "$GD/lib/arm64-v8a" "$GD/lib/armeabi-v7a" "$GD/lib/$LIBSUB"; do
   if [ -d "$d" ]; then
@@ -342,7 +357,7 @@ for w in /run/wayland-* /tmp/wayland-* /run/user/$(id -u)/wayland-*; do
   if [ -S "$w" ]; then
     export WAYLAND_DISPLAY=$(basename "$w")
     export XDG_RUNTIME_DIR=$(dirname "$w")
-    echo "socket wayland achado: $w -> WAYLAND_DISPLAY=$WAYLAND_DISPLAY" >> "$LOG"
+    echo "socket wayland achado: $w -> WAYLAND_DISPLAY=$WAYLAND_DISPLAY"
     cand="$cand wayland"
     break
   fi
@@ -353,8 +368,8 @@ if [ -e /dev/fb0 ]; then cand="$cand fbcon"; fi
 if ! echo "$cand" | grep -q ' wayland '; then cand="$cand wayland"; fi
 cand="$cand offscreen dummy"
 CANDIDATES="$cand"
-echo "candidatos SDL_VIDEODRIVER a testar: $CANDIDATES" >> "$LOG"
-echo "env: WAYLAND_DISPLAY=${WAYLAND_DISPLAY:-<unset>}  DISPLAY=${DISPLAY:-<unset>}  XDG_RUNTIME_DIR=${XDG_RUNTIME_DIR:-<unset>}" >> "$LOG"
+echo "candidatos SDL_VIDEODRIVER a testar: $CANDIDATES"
+echo "env: WAYLAND_DISPLAY=${WAYLAND_DISPLAY:-<unset>}  DISPLAY=${DISPLAY:-<unset>}  XDG_RUNTIME_DIR=${XDG_RUNTIME_DIR:-<unset>}"
 
 # ---------------------------------------------------------------- 7. EXEC
 BIN=""
