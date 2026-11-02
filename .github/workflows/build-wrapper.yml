@@ -33,7 +33,7 @@ jobs:
         # glibc ~2.33 -> ate o tee/grep do sistema quebrava com LD_PRELOAD
         # do shim. Bullseye exporta glibc 2.31: roda em QUALQUER device.
         run: |
-          docker run --rm -v "$PWD:/src" -w /src/ultrakill_port/wrapper debian:bullseye bash -ec '
+          docker run --rm -v "$PWD:/src" -w /src/ultrakill_port/wrapper public.ecr.aws/debian/debian:bullseye-slim bash -ec '
             apt-get update
             apt-get install -y --no-install-recommends \
               build-essential cmake pkg-config ninja-build \
