@@ -66,6 +66,14 @@ static void *try_dlopen(const char *const *candidates, int n, char *err, size_t 
 }
 
 int main(int argc, char **argv, char **envp) {
+  /* stderr SEM buffer: sem isso, um SIGSEGV perde a ultima linha impressa e
+   * ficamos sem saber em que passo caiu. */
+  setvbuf(stderr, NULL, _IONBF, 0);
+  /* Guarda de sinal o MAIS CEDO possivel - antes de qualquer dlopen/constructor
+   * do libunity.so, senao o crash nos init_array nao tem backtrace. */
+  shim_shader_install_guard();
+  fprintf(stderr, "[main] passo 1: portdir\n");
+
   /* ---- 0. localizar port root (../gamedata a partir do binario) ---- */
   char exedir[PATH_MAX]; exe_dir(exedir, sizeof exedir);
   char portdir[PATH_MAX];
@@ -101,6 +109,7 @@ int main(int argc, char **argv, char **envp) {
   }
 
   /* ---- 3. monta ANativeActivity com vm/env/clazz/window reais ---- */
+  fprintf(stderr, "[main] passo C: monta ANativeActivity + FindClass\n");
   static ANativeActivity act;
   act.packageName       = "arkboxgames.ultrakill";
   act.activityName      = "com.unity3d.player.UnityPlayerNativeActivity";
@@ -128,7 +137,9 @@ int main(int argc, char **argv, char **envp) {
     NULL
   };
   char err[256] = "";
+  fprintf(stderr, "[main] passo D: dlopen libunity (%s)\n", absli ? absli : "(LD_LIBRARY_PATH)");
   void *hu = try_dlopen(cands, absli ? 3 : 2, err, sizeof err);
+  fprintf(stderr, "[main] passo D: dlopen retornou %p\n", hu);
   if (!hu) {
     fprintf(stderr, "dlopen libunity.so falhou: %s\n", err);
     fprintf(stderr, "LD_LIBRARY_PATH=%s\n", getenv("LD_LIBRARY_PATH") ? getenv("LD_LIBRARY_PATH") : "(unset)");
