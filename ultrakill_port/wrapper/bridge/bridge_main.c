@@ -121,7 +121,7 @@ int main(int argc, char **argv, char **envp) {
   act.looper            = looper;
   act.contentScale      = 160;
   act.debuggable        = 0;
-  act.clazz             = env->FindClass(env,
+  act.clazz             = (*env)->FindClass(env,
                             "com/unity3d/player/UnityPlayerNativeActivity");
   act.env               = env;
   act.vm                = vm;
