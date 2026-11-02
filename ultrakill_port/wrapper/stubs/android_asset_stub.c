@@ -80,25 +80,25 @@ AAsset *AAssetManager_open(AAssetManager *mgr, const char *filename, int mode) {
 __attribute__((visibility("default")))
 off_t AAsset_getLength(AAsset *a) { return a ? a->len : -1; }
 
-__attribute__((visibility="default"))
+__attribute__((visibility("default")))
 off_t AAsset_read(AAsset *a, void *buf, size_t count) {
   if (!a || !buf) return -1;
   size_t n = fread(buf, 1, count, a->fp);
   return (off_t)n;
 }
 
-__attribute__((visibility="default"))
+__attribute__((visibility("default")))
 off_t AAsset_seek(AAsset *a, off_t offset, int whence) {
   if (!a) return -1;
   return fseeko(a->fp, offset, whence);
 }
 
-__attribute__((visibility="default"))
+__attribute__((visibility("default")))
 off_t AAsset_seek64(AAsset *a, off_t offset, int whence) {
   return AAsset_seek(a, offset, whence);
 }
 
-__attribute__((visibility="default"))
+__attribute__((visibility("default")))
 const void *AAsset_getBuffer(AAsset *a) {
   if (!a) return NULL;
   if (!a->buffer) {
@@ -113,7 +113,7 @@ const void *AAsset_getBuffer(AAsset *a) {
   return a->buffer;
 }
 
-__attribute__((visibility="default"))
+__attribute__((visibility("default")))
 void AAsset_close(AAsset *a) {
   if (!a) return;
   if (a->fp) fclose(a->fp);
@@ -122,12 +122,12 @@ void AAsset_close(AAsset *a) {
   free(a);
 }
 
-__attribute__((visibility="default"))
+__attribute__((visibility("default")))
 int AAsset_getRemainingLength64(AAsset *a) {
   if (!a) return -1;
   off_t here = ftello(a->fp);
   return (int)(a->len - here);
 }
 
-__attribute__((visibility="default"))
+__attribute__((visibility("default")))
 void AAssetManager_delete(AAssetManager *m) { free(m); }
