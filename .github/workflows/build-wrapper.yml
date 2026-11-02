@@ -54,13 +54,15 @@ jobs:
             apt-get -o Acquire::Check-Valid-Until=false update
             apt-get install -y --no-install-recommends \
               build-essential cmake pkg-config ninja-build \
-              libsdl2-dev
+              libsdl2-dev zlib1g
             ./build.sh arm64
             # zlib fisicamente ausente no ArkOS - embalamos junto (<=2.31)
-            Z=$(ls /usr/lib/aarch64-linux-gnu/libz.so.1* 2>/dev/null | head -1)
+            Z=$(ls /usr/lib/aarch64-linux-gnu/libz.so.1* /lib/aarch64-linux-gnu/libz.so.1* 2>/dev/null | head -1)
+            echo "zlib encontrado: [$Z]"
             if [ -n "$Z" ]; then
               cp -Lv "$Z" /src/ultrakill_port/libs/arm64/libz.so.1
               cp -v  /src/ultrakill_port/libs/arm64/libz.so.1 /src/ultrakill_port/libs/arm64/libz.so
+              ls -la /src/ultrakill_port/libs/arm64/ | grep -i libz
             fi
             # smoke test dentro do MESMO glibc do build
             export LD_LIBRARY_PATH=/src/ultrakill_port/libs/arm64
