@@ -148,8 +148,12 @@ int main(int argc, char **argv, char **envp) {
   }
 
   /* ---- 5. resolve entrypoint ---- */
-  dlerror();
-  UnityMain_fn unityMain = (UnityMain_fn)dlsym(hu, "UnityMain");
+  /* Android libunity.so NAO exporta UnityMain (dynsym: so JNI_OnLoad,
+   * JNI_OnUnload, UnitySendMessage, UnitySwappy_*). E neste glibc do
+   * SpruceOS, dlsym() de nome AUSENTE numa lib grande derruba o loader
+   * (SIGSEGV ld+0x9048, visto no log). Entao NAO tentamos UnityMain nem
+   * ANativeActivity_onCreate; vamos direto no JNI_OnLoad que EXISTE. */
+  UnityMain_fn unityMain = NULL;
 
   /* ---- 5a. shader discovery + guard (Rota 1-b, passo 0) ----
    * shim_shader_probe() enumera .dynsym de libunity.so e loga
