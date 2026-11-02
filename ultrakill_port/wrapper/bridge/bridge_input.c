@@ -270,6 +270,7 @@ static void *poll_thread(void *arg) {
 
 /* -------- API publica -------- */
 
+__attribute__((unused))
 static void *try_sym(void *h, const char *const names[], int n) {
   if (!h) return NULL;
   for (int i = 0; i < n; i++) {
@@ -288,26 +289,22 @@ shim_input_status shim_input_start(shim_input_ctx **out, void *unity_handle,
   atomic_init(&c->stop, 0);
 
   /* Descobre exports do Unity. Nomes comuns em Unity 2019.4 Android:
-   *   UnitySendTouchEvent(id, x, y, type)
-   *   UnitySendKeyDown(keycode)
-   *   UnitySendKeyUp(keycode)
-   *   UnitySendJoystickAxis(index, value)   <- nome varia p/ nativeSetJoystickAxis
-   * Se nao achar (o mais provavel em libunity.so 2019.4 - Unity
-   * esconde esses atras de UnityPlayer native methods), caimos em
-   * AInputQueue puro. */
-  static const char *names_touch_begin[] = {"UnitySendTouchBeginEvent", "UnitySendTouchEvent", NULL};
-  static const char *names_touch_move [] = {"UnitySendTouchMoveEvent",  NULL};
-  static const char *names_touch_end  [] = {"UnitySendTouchEndEvent",   NULL};
-  static const char *names_key_down   [] = {"UnitySendKeyDown",         "UnityCallAndroidKeyDown", NULL};
-  static const char *names_key_up     [] = {"UnitySendKeyUp",           "UnityCallAndroidKeyUp",   NULL};
-  static const char *names_axis       [] = {"UnitySendJoystickAxis",    "nativeSetJoystickAxis",   NULL};
-
-  c->u_touch_begin = (fn_touch_begin)try_sym(unity_handle, names_touch_begin, 2);
-  c->u_touch_move  = (fn_touch_move )try_sym(unity_handle, names_touch_move,  2);
-  c->u_touch_end   = (fn_touch_end  )try_sym(unity_handle, names_touch_end,   2);
-  c->u_key_down    = (fn_key_down   )try_sym(unity_handle, names_key_down,    2);
-  c->u_key_up      = (fn_key_up     )try_sym(unity_handle, names_key_up,      2);
-  c->u_axis_set    = (fn_axis_set   )try_sym(unity_handle, names_axis,        2);
+   *   UnitySendTouchEvent(id, x, y, type) / UnitySendKeyDown(keycode) ...
+   *
+   * NO BUILD ANDROID REAL (verificado via .dynsym): libunity.so exporta só
+   * 5 funcoes C (JNI_OnLoad/UnitySendMessage/UnitySwappy*). UnitySend*
+   * NAO EXISTE - a entrada de input passa pelos native methods registrados.
+   * Entao PULAMOS a exploracao: alem de inutil, um dlsym(hu,...) de nome
+   * ausente neste glibc do SpruceOS derruba o loader (SIGSEGV em ld+0x9048,
+   * visto no log). Fila AInputQueue pura cobre o input via SDL thread.
+   */
+  c->u_touch_begin = NULL;
+  c->u_touch_move  = NULL;
+  c->u_touch_end   = NULL;
+  c->u_key_down    = NULL;
+  c->u_key_up      = NULL;
+  c->u_axis_set    = NULL;
+  static const char *const names_unused[] = { NULL }; (void)names_unused;
 
   /* Garante SDL subsystems necessários. Nao inicializamos VIDEO
    * de novo - bridge_gl.c já fez. */
