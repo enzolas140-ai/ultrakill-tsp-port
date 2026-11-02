@@ -154,7 +154,7 @@ FWD(void*, eglGetProcAddress_real, (const char *name), (name), (void*)0)
 typedef void (*PFN_eglGetProcAddress_)(const char *);
 __attribute__((visibility("default")))
 void (*eglGetProcAddress(const char *name))(void) {
-  extern void (*shim_eglGetProcAddress_dispatch(const char *));
+  extern void (*shim_eglGetProcAddress_dispatch(const char *))(void);
   void (*ours)(void) = shim_eglGetProcAddress_dispatch(name);
   if (ours) return ours;
   return (void(*)(void))eglGetProcAddress_real(name);
