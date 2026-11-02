@@ -254,6 +254,34 @@ for d in "$GD/lib/arm64-v8a" "$GD/lib/armeabi-v7a" "$GD/lib/$LIBSUB"; do
   fi
 done
 
+# ------------------------------------------------------------------ 6a. ESCOLHE libSDL2
+# SpruceOS tem MULTIPLOS libSDL2 - nem todos tem video driver real. Escolhe
+# o que tem dummy/offscreen/kmsdrm compilados (testa tambem se a classe
+# ELF bate com a nossa - o /mnt/SDCARD/miyoo/lib pode ser armv7 32-bit).
+{
+  echo "== procurando libSDL2 com video backend real (mesma ABI do bridge) =="
+  if [ ! -x "$GD/bin/ultrakill" ]; then
+    echo "  bridge ELF ainda nao extraido - pulando"
+  else
+    want_class=$(readelf -h "$GD/bin/ultrakill" 2>/dev/null | awk -F: '/Class/{print $2}' | tr -d ' ')
+    echo "  bridge ELF class: ${want_class:-?}"
+    for L in $(find /usr/lib /lib /opt /mnt/SDCARD -maxdepth 5 \
+              \( -name 'libSDL2-2.0.so*' -o -name 'libSDL2.so*' \) 2>/dev/null | sort -u); do
+      this_class=$(readelf -h "$L" 2>/dev/null | awk -F: '/Class/{print $2}' | tr -d ' ')
+      drv=$(strings "$L" 2>/dev/null | grep -E '^(x11|wayland|kmsdrm|fbcon|directfb|offscreen|dummy|cocoa|uikit)$' | sort -u | tr '\n' ' ')
+      # ignora se classe ELF nao bate
+      [ -n "$want_class" ] && [ "$this_class" != "$want_class" ] && continue
+      # ignora se so tem 'dummy windows' (windows string e false-positive)
+      if echo " $drv " | grep -q ' dummy ' || echo " $drv " | grep -qE ' (kmsdrm|x11|wayland|fbcon|offscreen|directfb) '; then
+        dir=$(dirname "$L")
+        echo "  OK: $L ($this_class) drivers=[$drv]"
+        export LD_LIBRARY_PATH="$dir${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+        echo "     -> LD_LIBRARY_PATH agora prioriza $dir"
+      fi
+    done
+  fi
+} 2>&1 | tee -a "$LOG"
+
 # Persistencia
 export ULTRAKILL_PERSIST="$STATEDIR"
 
