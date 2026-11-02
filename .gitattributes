@@ -1,0 +1,1 @@
+# normalizar line endings para scripts\n*.sh   text eol=lf\n*.py   text eol=lf\n*.yml  text eol=lf\nCMakeLists.txt text eol=lf\n*.c    text eol=lf\n*.h    text eol=lf\n
