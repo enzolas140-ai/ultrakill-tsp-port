@@ -269,6 +269,44 @@ for d in "$GD/lib/arm64-v8a" "$GD/lib/armeabi-v7a" "$GD/lib/$LIBSUB"; do
   fi
 done
 
+# ------------------------------------------------------- 6b. Aliases Android->glibc
+# libunity.so / libil2cpp.so (Bionic) tem DT_NEEDED libc.so, libm.so,
+# libdl.so, libz.so (SEM versao). No glibc do SpruceOS so existem
+# libc.so.6 / libm.so.6 / libdl.so.2 / libz.so.1. Sem o alias, dlopen
+# falha com "libm.so: cannot open shared object".
+# Copiamos o arquivo REAL do proprio device para o nome Android. O loader
+# deduplica via DT_SONAME (ex: libc.so copiado tem SONAME=libc.so.6, ja
+# carregado pelo processo) => nenhum simbolo duplicado, nenhum risco.
+android_alias() {
+  want="$1"; shift
+  [ -e "$SHIMDIR/$want" ] && return 0
+  for real in "$@"; do
+    if [ -e "$real" ]; then
+      if cp "$real" "$SHIMDIR/$want" 2>/dev/null; then
+        echo "alias: $real -> $SHIMDIR/$want"
+        return 0
+      fi
+    fi
+  done
+  echo "AVISO: nenhuma lib real encontrada para alias $want (esperados: $@)"
+  return 1
+}
+GLIBC_GLOBS="/lib /usr/lib /usr/lib64 /lib/aarch64-linux-gnu /usr/lib/aarch64-linux-gnu"
+for w in libc libm libdl; do
+  for g in $GLIBC_GLOBS; do
+    cand="$g/$w.so.6"
+    [ -e "$cand" ] || cand="$g/$w.so.2"
+    if [ -e "$cand" ]; then
+      [ -e "$SHIMDIR/$w.so" ] || cp "$cand" "$SHIMDIR/$w.so" 2>/dev/null && \
+        [ -e "$SHIMDIR/$w.so" ] && echo "alias: $cand -> $SHIMDIR/$w.so"
+      break
+    fi
+  done
+done
+android_alias libz.so /usr/lib/libz.so.1 /lib/libz.so.1 /usr/lib/aarch64-linux-gnu/libz.so.1
+# GLESv1_CM (alguns builds do Unity pedem):
+android_alias libGLESv1_CM.so /usr/lib/libGLESv1_CM.so /usr/lib/libGLESv1_CM.so.1
+
 # ------------------------------------------------------------------ 6a. Diagnosticos libSDL2
 # Nao alteramos mais LD_LIBRARY_PATH aqui - ja embarcamos nosso proprio
 # libSDL2.so (copia do portmaster) em $SHIMDIR. So lista o que existe p/

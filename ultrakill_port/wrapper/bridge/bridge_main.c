@@ -48,11 +48,16 @@ static void exe_dir(char *out, size_t n) {
 }
 
 static void *try_dlopen(const char *const *candidates, int n, char *err, size_t elen) {
+  if (err && elen) err[0] = 0;
   for (int i = 0; i < n; i++) {
+    dlerror();   /* limpa estado anterior */
     void *h = dlopen(candidates[i], RTLD_NOW | RTLD_GLOBAL);
     if (h) return h;
+    const char *e = dlerror();   /* UMA so chamada - dlerror() consome a msg */
+    if (err && elen)
+      snprintf(err, elen, "dlopen(\"%s\"): %s", candidates[i],
+               e ? e : "(sem mensagem)");
   }
-  snprintf(err, elen, "%s", dlerror() ? dlerror() : "no candidates");
   return NULL;
 }
 
