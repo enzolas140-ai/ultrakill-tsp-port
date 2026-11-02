@@ -35,8 +35,8 @@ jobs:
             libgl1 libglx-mesa0 libegl1 libgles2 \
             libsdl2-2.0-0 libsdl2-dev unzip build-essential cmake
           # llvmpipe garante GL 3.x por software via mesa
-          grep -i -m1 'model name' /proc/cpuinfo || true
-          python3 -c "print('ram gb', __import__('os').sysconf(__import__('os').SC_PHYS_PAGES)*4096/1e9)"
+          grep -c '^processor' /proc/cpuinfo
+          free -m | head -2
 
       - name: build wrapper (stubs + bridge)
         working-directory: ultrakill_port/wrapper
