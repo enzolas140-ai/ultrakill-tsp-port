@@ -186,11 +186,48 @@ int main(int argc, char **argv, char **envp) {
   }
 
   if (!unityMain) {
+    /* Build ANDROID nao exporta UnityMain; o entry real e JNI_OnLoad(vm, res).
+     * Ele cachea a JavaVM e faz RegisterNatives na classe UnityPlayer (nosso
+     * mini-JVM agora ARMAZENA esses natives). Depois disso, o loop do jogo e
+     * iniciado chamando os natives nativeSetup/nativeRun na ordem da Activity. */
+    typedef int (*JNI_OnLoad_fn)(JavaVM *, void *);
+    JNI_OnLoad_fn onload = (JNI_OnLoad_fn)dlsym(hu, "JNI_OnLoad");
+    if (onload) {
+      fprintf(stderr, ">> JNI_OnLoad(vm) - entry real Android\n");
+      int ver = onload(vm, NULL);
+      fprintf(stderr, "JNI_OnLoad retornou JNI_VERSION=0x%x\n", ver);
+      extern void shim_jni_dump_natives(void);
+      extern void *shim_jni_find_native(const char *, const char *);
+      extern const char *shim_jni_native_sig(const char *, const char *);
+      shim_jni_dump_natives();
+
+      const char *UP = "com/unity3d/player/UnityPlayer";
+      /* Ordem que a UnityPlayer.java roda o boot: */
+      static const char *seq[] = {
+        "nativePrepare", "nativeSetup", "nativePreInit", "nativeInit",
+        "nativeAudioInit", "nativeVideoInit", "nativeStartup", "nativeRun",
+        NULL
+      };
+      typedef void (*Native_void)(JNIEnv *, void *, ...);
+      typedef void (*Native_int)(JNIEnv *, void *, int);
+      for (int i = 0; seq[i]; i++) {
+        void *fn = shim_jni_find_native(UP, seq[i]);
+        if (!fn) continue;
+        const char *sig = shim_jni_native_sig(UP, seq[i]);
+        fprintf(stderr, "chamando %s (%s)\n", seq[i], sig ? sig : "?");
+        if (sig && strstr(sig, "I"))       ((Native_int)fn)(env, NULL, 0);
+        else                               ((Native_void)fn)(env, NULL);
+      }
+      /* Se nada rodou, o loop pode vir numa thread spawnada pelo OnLoad. */
+      fprintf(stderr, ">> pos-JNI_OnLoad (aguardando render thread)\n");
+      for (volatile int s = 0; s < 300; s++) { usleep(10000); } /* 3s de espera */
+      return 0;
+    }
     ANativeActivity_onCreate_fn oncreate =
         (ANativeActivity_onCreate_fn)dlsym(hu, "ANativeActivity_onCreate");
     if (!oncreate) {
-      fprintf(stderr, "nem UnityMain nem ANativeActivity_onCreate exportados por libunity.so\n");
-      fprintf(stderr, "isto indica build Unity 5.x/2017.x ou ARM32 com ABI mismatch\n");
+      fprintf(stderr, "nem UnityMain nem JNI_OnLoad nem ANativeActivity_onCreate\n");
+      fprintf(stderr, "isto indica build Unity 5.x/2017.x ou ABI mismatch\n");
       return 4;
     }
     fprintf(stderr, "usando ANativeActivity_onCreate (fallback)\n");

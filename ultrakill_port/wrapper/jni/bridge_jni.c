@@ -340,8 +340,65 @@ static jint JNICALL j_SetByteArrayRegion(JNIEnv *e, jbyteArray a, jsize st, jsiz
 }
 
 /* Misc */
-static jint JNICALL j_RegisterNatives(JNIEnv *e, jclass c, const void *methods, jint n) {
-  (void)e; (void)c; (void)methods; (void)n; return JNI_OK;
+/* JNINativeMethod conforme jni.h: { char*name; char*signature; void*fnPtr }. */
+typedef struct { const char *name; const char *signature; void *fnPtr; } shim_JNINativeMethod;
+
+#define SHIM_MAX_NATIVES 1024
+static struct {
+  char cls[160];
+  char name[160];
+  char sig[160];
+  void *fn;
+} g_natives[SHIM_MAX_NATIVES];
+static int g_natives_n = 0;
+
+static jint JNICALL j_RegisterNatives(JNIEnv *e, jclass c, const void *methods_, jint n) {
+  (void)e;
+  const shim_JNINativeMethod *m = (const shim_JNINativeMethod*)methods_;
+  const char *clsname = c ? ((struct _jobjectRef*)c)->name : "?";
+  fprintf(stderr, "JNI RegisterNatives: class=%s n=%d\n", clsname, (int)n);
+  for (int i = 0; i < n && m; i++) {
+    fprintf(stderr, "   native[%d] %s %s -> %p\n", i,
+            m[i].name ? m[i].name : "?",
+            m[i].signature ? m[i].signature : "?",
+            m[i].fnPtr);
+    if (g_natives_n < SHIM_MAX_NATIVES) {
+      snprintf(g_natives[g_natives_n].cls, sizeof g_natives[g_natives_n].cls, "%s", clsname);
+      snprintf(g_natives[g_natives_n].name, sizeof g_natives[g_natives_n].name, "%s",
+               m[i].name ? m[i].name : "?");
+      snprintf(g_natives[g_natives_n].sig, sizeof g_natives[g_natives_n].sig, "%s",
+               m[i].signature ? m[i].signature : "");
+      g_natives[g_natives_n].fn = m[i].fnPtr;
+      g_natives_n++;
+    }
+  }
+  return JNI_OK;
+}
+
+/* API p/ o bridge invocar um native registrado (ex: nativeSetup/nativeRun). */
+__attribute__((visibility("default")))
+void *shim_jni_find_native(const char *cls, const char *method) {
+  for (int i = 0; i < g_natives_n; i++)
+    if ((!cls || !strcmp(g_natives[i].cls, cls)) &&
+        !strcmp(g_natives[i].name, method))
+      return g_natives[i].fn;
+  return NULL;
+}
+__attribute__((visibility("default")))
+const char *shim_jni_native_sig(const char *cls, const char *method) {
+  for (int i = 0; i < g_natives_n; i++)
+    if ((!cls || !strcmp(g_natives[i].cls, cls)) &&
+        !strcmp(g_natives[i].name, method))
+      return g_natives[i].sig;
+  return NULL;
+}
+__attribute__((visibility("default")))
+int shim_jni_natives_count(void) { return g_natives_n; }
+__attribute__((visibility("default")))
+void shim_jni_dump_natives(void) {
+  fprintf(stderr, "== %d natives registrados ==\n", g_natives_n);
+  for (int i = 0; i < g_natives_n; i++)
+    fprintf(stderr, "  %s#%s %s\n", g_natives[i].cls, g_natives[i].name, g_natives[i].sig);
 }
 static jint JNICALL j_UnregisterNatives(JNIEnv *e, jclass c) { (void)e; (void)c; return JNI_OK; }
 static jint JNICALL j_MonitorEnter(JNIEnv *e, jobject o) { (void)e; (void)o; return JNI_OK; }

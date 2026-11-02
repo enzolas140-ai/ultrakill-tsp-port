@@ -76,10 +76,21 @@ def unversion(path, check_only=False):
            'verneed_off': verneed_file_off}
 
     if not check_only:
-        # 1. versym -> 1
+        # 1. zerar versym SO dos SIMBOLOS INDEFINIDOS (imports). Entry i de
+        #    .gnu.version corresponde a dynsym[i]. Index 0 = "sem versao" p/
+        #    o glibc, que faz lookup plain e NAO indexa l_versions[] (que
+        #    ficou NULL apos matarmos DT_VERNEED). Deixamos os DEFINIDOS
+        #    intactos (apontam p/ DT_VERDEF, que preservamos) pra UnityMain
+        #    continuar exportado/visivel.
         if versym_off is not None:
-            for i in range(0, versym_size, 2):
-                struct.pack_into('<H', data, versym_off + i, 1)
+            dsym = elf.get_section_by_name('.dynsym')
+            idx = 0
+            for s in dsym.iter_symbols():
+                if idx * 2 >= versym_size:
+                    break
+                if s['st_shndx'] == 'SHN_UNDEF':
+                    struct.pack_into('<H', data, versym_off + idx * 2, 0)
+                idx += 1
         # 2. DT_VERNEEDNUM -> 0
         if verneednum_file_off is not None:
             if is64:
