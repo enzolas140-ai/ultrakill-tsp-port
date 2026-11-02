@@ -199,8 +199,7 @@ FWD(EGLBoolean, eglGetSyncAttrib, (EGLDisplay dpy, void *sync, int attr, EGLint 
 /* EGL 1.4 */
 FWD(EGLDisplay, eglGetPlatformDisplay,
     (EGLenum plat, void *ndisp, const EGLint *att), (plat, ndisp, att), EGL_NO_DISPLAY)
-FWD(EGLDisplay, eglGetPlatformDisplayEXT,
-    (EGLenum plat, void *ndisp, const EGLint *att), (plat, ndisp, att), EGL_NO_DISPLAY)
+/* eglGetPlatformDisplayEXT definido logo abaixo (sintetiza o device EXT p/ SDL offscreen) */
 
 /* EGL 1.5 */
 FWD(EGLContext, eglCreateContextAttribsARB,
@@ -213,6 +212,70 @@ FWD(void*, eglCreateImageKHR,
     (EGLDisplay dpy, EGLContext ctx, EGLenum target, EGLClientBuffer buf, const EGLint *att),
     (dpy, ctx, target, buf, att), NULL)
 FWD(EGLBoolean, eglDestroyImageKHR, (EGLDisplay dpy, void *img), (dpy, img), EGL_FALSE)
+
+/* =========================================================================
+ *  EXT_device_enumeration - SINTETIZADO
+ *
+ *  SDL2 com video driver "offscreen" exige eglQueryDevicesEXT para obter
+ *  um EGLDevice sem display nativo. Muitos DDKs embedded (PowerVR em
+ *  handheld) nao expoe esta extensao - so eglGetDisplay(EGL_DEFAULT).
+ *  Fornecemos uma sintese: devolvemos UMA "device" sentinel, e no
+ *  eglGetPlatformDisplayEXT mapeamos de volta pra EGL_DEFAULT_DISPLAY
+ *  quando recebermos o sentinel. Sem isso SDL offscreen retorna
+ *  "eglQueryDevicesEXT is missing" e shim_gl_init falha.
+ * ========================================================================= */
+#define SHIM_EGL_DEVICE_SENTINEL ((void*)(uintptr_t)0xE0)
+typedef EGLBoolean (*PFN_qdevs)(EGLint, void**, EGLint*);
+typedef EGLDisplay  (*PFN_gpdEXT)(EGLenum, void*, const EGLint*);
+typedef EGLBoolean  (*PFN_qdattr)(EGLDisplay, int, EGLint*);
+
+__attribute__((visibility("default")))
+EGLBoolean eglQueryDevicesEXT(EGLint max_devices, void **devices, EGLint *num_devices) {
+  ensure_real();
+  static PFN_qdevs real; if (!real) real = (PFN_qdevs)sym("eglQueryDevicesEXT");
+  if (real) {
+    EGLBoolean r = real(max_devices, devices, num_devices);
+    if (r == EGL_TRUE && (!num_devices || *num_devices > 0)) return EGL_TRUE;
+    /* real devolveu TRUE mas 0 devices - cai no nosso fallback */
+  }
+  fprintf(stderr, "shim/egl: eglQueryDevicesEXT sintetizado (1 device)\n");
+  if (num_devices) *num_devices = 1;
+  if (devices && max_devices > 0) devices[0] = SHIM_EGL_DEVICE_SENTINEL;
+  return EGL_TRUE;
+}
+
+__attribute__((visibility("default")))
+EGLBoolean eglQueryDeviceStringEXT(void *dev, const char *name) {
+  (void)dev; (void)name; return EGL_TRUE;
+}
+
+__attribute__((visibility("default")))
+EGLDisplay eglGetPlatformDisplayEXT(EGLenum platform, void *native_display,
+                                     const EGLint *attrib_list) {
+  ensure_real();
+  static PFN_gpdEXT real; if (!real) real = (PFN_gpdEXT)sym("eglGetPlatformDisplayEXT");
+  /* traduz o sentinel pra EGL_DEFAULT_DISPLAY (0) - ai o driver real aceita */
+  void *nd = (native_display == SHIM_EGL_DEVICE_SENTINEL) ? NULL : native_display;
+  if (real) {
+    EGLDisplay d = real(platform, nd, attrib_list);
+    if (d) return d;
+  }
+  static PFN_gpdEXT real2;   /* tenta a variante sem EXT */
+  if (!real2) real2 = (PFN_gpdEXT)sym("eglGetPlatformDisplay");
+  if (real2) return real2(platform, nd, attrib_list);
+  /* ultimo recurso: eglGetDisplay(EGL_DEFAULT_DISPLAY) */
+  return eglGetDisplay((EGLNativeDisplayType)0);
+}
+
+__attribute__((visibility("default")))
+EGLBoolean eglQueryDisplayAttribEXT(EGLDisplay dpy, int attribute, EGLint *value) {
+  ensure_real();
+  static PFN_qdattr real; if (!real) real = (PFN_qdattr)sym("eglQueryDisplayAttribEXT");
+  if (real) return real(dpy, attribute, value);
+  /* fallback: aceita tudo */
+  if (value) *value = 0;
+  return EGL_TRUE;
+}
 
 /* -------- Pixmap e Pbuffer surfaces -------- */
 FWD(EGLSurface, eglCreatePbufferSurface,

@@ -332,15 +332,29 @@ export ULTRAKILL_PERSIST="$STATEDIR"
 
 # Ordem: primeiro o que o proprio SDL escolhe (vazio), depois
 # explicitos. Se DISPLAY/WAYLAND_DISPLAY ja estao no env (ES
-# exportando p/ port), tenta-os primeiro.
+# exportando p/ port), tenta-os primeiro. Se socket wayland existir,
+# forca WAYLAND_DISPLAY.
 cand=""
 if [ -n "${DISPLAY:-}" ]; then cand="$cand x11"; fi
 if [ -n "${WAYLAND_DISPLAY:-}" ]; then cand="$cand wayland"; fi
+# detecta socket wayland sem depender da env var
+for w in /run/wayland-* /tmp/wayland-* /run/user/$(id -u)/wayland-*; do
+  if [ -S "$w" ]; then
+    export WAYLAND_DISPLAY=$(basename "$w")
+    export XDG_RUNTIME_DIR=$(dirname "$w")
+    echo "socket wayland achado: $w -> WAYLAND_DISPLAY=$WAYLAND_DISPLAY" >> "$LOG"
+    cand="$cand wayland"
+    break
+  fi
+done
 if [ -e /dev/dri/card0 ]; then cand="$cand kmsdrm"; fi
 if [ -e /dev/fb0 ]; then cand="$cand fbcon"; fi
-cand="$cand directfb offscreen dummy"
+# wayland SEMPRE no fim tbem, na falta de melhor
+if ! echo "$cand" | grep -q ' wayland '; then cand="$cand wayland"; fi
+cand="$cand offscreen dummy"
 CANDIDATES="$cand"
 echo "candidatos SDL_VIDEODRIVER a testar: $CANDIDATES" >> "$LOG"
+echo "env: WAYLAND_DISPLAY=${WAYLAND_DISPLAY:-<unset>}  DISPLAY=${DISPLAY:-<unset>}  XDG_RUNTIME_DIR=${XDG_RUNTIME_DIR:-<unset>}" >> "$LOG"
 
 # ---------------------------------------------------------------- 7. EXEC
 BIN=""
