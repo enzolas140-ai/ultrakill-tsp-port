@@ -2,8 +2,8 @@
  *
  * Como a GE8300 é dirigida pelo PowerVR DDK (não Mesa), assumimos que
  * existem no sistema:
- *   - /usr/lib/*/libEGL.so.1 (ou sem .1)
- *   - /usr/lib/*/libGLESv2.so.2
+ *   - /usr/lib/{arch}/libEGL.so.1
+ *   - /usr/lib/{arch}/libGLESv2.so.2
  * Estes são carregados via dlopen - não linkamos de forma estática para
  * não conflitar com o stub do shim caso exista um libEGL.so falso.
  *

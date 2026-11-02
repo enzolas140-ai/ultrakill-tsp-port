@@ -59,6 +59,8 @@ enum { JNI_VERSION_1_1 = 0x00010001, JNI_VERSION_1_2 = 0x00010002,
        JNI_VERSION_1_4 = 0x00010004, JNI_VERSION_1_6 = 0x00010006 };
 enum { JNI_COMMIT = 1, JNI_ABORT = 2 };
 
+#define JNI_TRUE  1
+#define JNI_FALSE 0
 #define JNICALL
 
 /* -------- JNIEnv (JNINativeInterface_) --------
