@@ -1004,6 +1004,16 @@ static int bender_ALooper_addFd(BenderLooper *l,int fd,int ident,int events,int(
 static int bender_ALooper_removeFd(BenderLooper *l,int fd){(void)l;(void)fd;return 1;}
 static int bender_ALooper_pollOnce(int timeoutMillis,int*outFd,int*outEvents,void**outData){if(outFd)*outFd=-1;if(outEvents)*outEvents=0;if(outData)*outData=NULL;if(timeoutMillis>0){struct timespec ts={0,(long)(timeoutMillis>10?10:timeoutMillis)*1000000L};nanosleep(&ts,NULL);}return -3;}
 
+/* ULTRAKILL: libunity.so 2019.4 importa ALooper_pollAll (o Unity 6 do port
+ * modelo nao importa). Sem este simbolo o probe terminava em
+ * "[JNI_FLOW][BLOCKED] imports/relocations pendentes" sem executar NADA do
+ * guest. Mesma semantica do pollOnce acima: dorme pouco, diz que nao houve
+ * evento - quem empurra os frames e o Choreographer proprio do BENDER. */
+static int bender_ALooper_pollAll(int timeoutMillis,int*outFd,int*outEvents,void**outData){
+    int r=bender_ALooper_pollOnce(timeoutMillis,outFd,outEvents,outData);
+    return r==-3?-1:r;
+}
+
 static void *bender_ASensorManager_getInstance(void){return (void*)0x1;}
 static int bender_ASensorManager_getSensorList(void*m,void***list){(void)m;if(list)*list=NULL;return 0;}
 static void *bender_ASensorManager_getDefaultSensor(void*m,int type){(void)m;(void)type;return NULL;}
@@ -1307,6 +1317,13 @@ static int bender_access_2771(const char*path,int mode){
     int saved=errno;char resolved[2048];
     if(bender_asset_path_resolve_2771(path,resolved,sizeof(resolved),"access"))return access(resolved,mode);
     errno=saved;return rc;
+}
+static int bender_fstat_2771(int fd,struct stat*st){
+    /* ULTRAKILL: libunity E libil2cpp importam fstat(); o port modelo so
+     * tinha stat/lstat/open. Mesmo layout de struct stat que eles ja usam
+     * no stat acima (host glibc), entao e so encaminhar para o fd. */
+    if(!st){errno=EFAULT;return -1;}
+    return fstat(fd,st);
 }
 static int bender_stat_2771(const char*path,struct stat*st){
     int rc=stat(path,st);if(rc==0||!path)return rc;
@@ -6108,7 +6125,7 @@ static uintptr_t bridge_symbol(const char *name) {
     BS("pthread_attr_init",bender_pthread_attr_init);BS("pthread_attr_destroy",bender_pthread_attr_destroy);BS("pthread_attr_setdetachstate",bender_pthread_attr_setdetachstate);BS("pthread_attr_setstacksize",bender_pthread_attr_setstacksize);BS("pthread_attr_getstack",bender_pthread_attr_getstack);BS("pthread_getattr_np",bender_pthread_getattr_np);
     BS("sem_init",bender_sem_init);BS("sem_destroy",bender_sem_destroy);BS("sem_wait",bender_sem_wait);BS("sem_timedwait",bender_sem_timedwait);BS("sem_post",bender_sem_post);BS("sem_getvalue",bender_sem_getvalue);
     BS("fwrite",bender_fwrite);BS("fread",bender_fread);BS("fprintf",bender_fprintf);BS("vfprintf",bender_vfprintf);BS("fputc",bender_fputc);BS("fflush",bender_fflush);BS("fseek",bender_fseek);BS("fopen",bender_fopen);BS("fclose",bender_fclose);
-    BS("access",bender_access_2771);BS("stat",bender_stat_2771);BS("lstat",bender_lstat_2771);BS("open",bender_open_2771);BS("opendir",bender_opendir_2771);BS("realpath",bender_realpath_2771);
+    BS("access",bender_access_2771);BS("stat",bender_stat_2771);BS("lstat",bender_lstat_2771);BS("fstat",bender_fstat_2771);BS("open",bender_open_2771);BS("opendir",bender_opendir_2771);BS("realpath",bender_realpath_2771);
     BS("__android_log_print",bender_android_log_print);BS("__android_log_write",bender_android_log_write);BS("__android_log_vprint",bender_android_log_vprint);BS("__android_log_buf_write",bender_android_log_buf_write);
     BS("__errno",bender___errno);BS("__gnu_strerror_r",bender___gnu_strerror_r);BS("android_set_abort_message",bender_android_set_abort_message);BS("__assert2",bender___assert2);BS("strlcpy",bender_strlcpy);BS("__strncpy_chk2",bender___strncpy_chk2);BS("__strlen_chk",bender___strlen_chk);BS("__strchr_chk",bender___strchr_chk);BS("__umask_chk",bender___umask_chk);BS("__FD_SET_chk",bender___FD_SET_chk);BS("__FD_ISSET_chk",bender___FD_ISSET_chk);
     BS("__system_property_get",bender___system_property_get);BS("__system_property_find",bender___system_property_find);BS("__system_property_read",bender___system_property_read);
@@ -6123,7 +6140,7 @@ static uintptr_t bridge_symbol(const char *name) {
     BS("eglGetConfigAttrib",bender_eglGetConfigAttrib);BS("eglGetCurrentContext",bender_eglGetCurrentContext);BS("eglGetCurrentDisplay",bender_eglGetCurrentDisplay);BS("eglGetCurrentSurface",bender_eglGetCurrentSurface);BS("eglGetDisplay",bender_eglGetDisplay);BS("eglGetError",bender_eglGetError);BS("eglGetProcAddress",bender_eglGetProcAddress);BS("eglInitialize",bender_eglInitialize);
     BS("eglMakeCurrent",bender_eglMakeCurrent);BS("eglQueryString",bender_eglQueryString);BS("eglQuerySurface",bender_eglQuerySurface);BS("eglReleaseThread",bender_eglReleaseThread);BS("eglSurfaceAttrib",bender_eglSurfaceAttrib);BS("eglSwapBuffers",bender_eglSwapBuffers);BS("eglSwapInterval",bender_eglSwapInterval);BS("eglTerminate",bender_eglTerminate);BS("eglWaitClient",bender_eglWaitClient);
     BS("AChoreographer_getInstance",bender_AChoreographer_getInstance);BS("AChoreographer_postFrameCallback",bender_AChoreographer_postFrameCallback);BS("AChoreographer_postFrameCallback64",bender_AChoreographer_postFrameCallback64);
-    BS("ALooper_prepare",bender_ALooper_prepare);BS("ALooper_forThread",bender_ALooper_forThread);BS("ALooper_acquire",bender_ALooper_acquire);BS("ALooper_release",bender_ALooper_release);BS("ALooper_wake",bender_ALooper_wake);BS("ALooper_addFd",bender_ALooper_addFd);BS("ALooper_removeFd",bender_ALooper_removeFd);BS("ALooper_pollOnce",bender_ALooper_pollOnce);
+    BS("ALooper_prepare",bender_ALooper_prepare);BS("ALooper_forThread",bender_ALooper_forThread);BS("ALooper_acquire",bender_ALooper_acquire);BS("ALooper_release",bender_ALooper_release);BS("ALooper_wake",bender_ALooper_wake);BS("ALooper_addFd",bender_ALooper_addFd);BS("ALooper_removeFd",bender_ALooper_removeFd);BS("ALooper_pollOnce",bender_ALooper_pollOnce);BS("ALooper_pollAll",bender_ALooper_pollAll);
     BS("ASensorManager_getInstance",bender_ASensorManager_getInstance);BS("ASensorManager_getSensorList",bender_ASensorManager_getSensorList);BS("ASensorManager_getDefaultSensor",bender_ASensorManager_getDefaultSensor);BS("ASensorManager_createEventQueue",bender_ASensorManager_createEventQueue);BS("ASensorManager_destroyEventQueue",bender_ASensorManager_destroyEventQueue);BS("ASensorEventQueue_enableSensor",bender_ASensorEventQueue_enableSensor);BS("ASensorEventQueue_disableSensor",bender_ASensorEventQueue_disableSensor);BS("ASensorEventQueue_setEventRate",bender_ASensorEventQueue_setEventRate);BS("ASensorEventQueue_hasEvents",bender_ASensorEventQueue_hasEvents);BS("ASensorEventQueue_getEvents",bender_ASensorEventQueue_getEvents);BS("ASensor_getType",bender_ASensor_getType);BS("ASensor_getResolution",bender_ASensor_getResolution);BS("ASensor_getMinDelay",bender_ASensor_getMinDelay);BS("ASensor_getName",bender_ASensor_getName);BS("ASensor_getVendor",bender_ASensor_getVendor);
     if(strcmp(name,"__sF")==0)return (uintptr_t)g_bionic_sF;
 #undef BS
