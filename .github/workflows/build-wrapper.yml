@@ -125,6 +125,7 @@ jobs:
           cp -rv libs/arm64/*                       /tmp/out/
           cp -v gamedata/bin/ultrakill             /tmp/out/
           cp -v wrapper/build-arm64/input_probe     /tmp/out/
+          cp -v wrapper/build-arm64/egltest         /tmp/out/
           cp -v wrapper/build-arm64/symbol_probe    /tmp/out/ 2>/dev/null || true
           ls -la /tmp/out
 
@@ -148,6 +149,7 @@ jobs:
             ultrakill-built-arm64.tar.gz
             ultrakill_port/libs/arm64/**
             ultrakill_port/gamedata/bin/ultrakill
+            ultrakill_port/wrapper/build-arm64/egltest
           retention-days: 30
 
   build-armv7:

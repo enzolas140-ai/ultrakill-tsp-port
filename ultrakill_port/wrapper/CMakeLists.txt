@@ -118,3 +118,8 @@ if(ULTRAKILL_BUILD_TESTS)
   set_target_properties(symbol_probe PROPERTIES
     LINK_FLAGS "-Wl,--export-dynamic")
 endif()
+
+# egltest: diagnostico EGL puro sem SDL (R36S: separa culpa do mesa vs
+# do SDL-kmsdrm). Sempre buildado.
+add_executable(egltest tools/egltest.c)
+target_link_libraries(egltest PRIVATE dl)
