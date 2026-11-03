@@ -35,6 +35,7 @@ typedef struct shim_gl_ctx {
   void              *sdl_renderer;   /* SDL_Renderer*  */
   void              *sdl_texture;    /* SDL_Texture*   */
   void              *pixel_buf;      /* RGBA w*h*4     */
+  int                kms_ready;      /* 1 = scanout dumb-buffer direto (R36S) */
 } shim_gl_ctx;
 
 /* Cria SDL window + EGL context com client API GLES3 (fallback GLES2).

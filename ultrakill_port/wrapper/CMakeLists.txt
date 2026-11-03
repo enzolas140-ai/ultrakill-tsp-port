@@ -75,8 +75,9 @@ target_link_libraries(bridge
   PRIVATE
     ${SDL2_LIBRARIES}
     android_stub
-    dl m pthread)
+    dl m pthread drm)
 target_link_directories(bridge PRIVATE ${SDL2_LIBRARY_DIRS})
+target_include_directories(bridge PRIVATE /usr/include/libdrm)
 # -rdynamic (export-dynamic): faz shim_get_native_window visivel via
 # dlsym(RTLD_DEFAULT,...) a partir do bridge_egl_shim carregado depois.
 set_target_properties(bridge PROPERTIES

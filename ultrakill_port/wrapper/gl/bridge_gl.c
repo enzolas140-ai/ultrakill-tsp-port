@@ -21,6 +21,15 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+/* KMS direct scanout (ULTRAKILL_KMS_DIRECT, R36S): dumb buffer em card0 */
+#include <unistd.h>
+#include <fcntl.h>
+#include <sys/mman.h>
+#include <sys/ioctl.h>
+#include <errno.h>
+#include <stdint.h>
+#include <xf86drm.h>
+#include <drm.h>
 
 #include <SDL.h>
 #include <SDL_syswm.h>
@@ -151,6 +160,88 @@ struct shim_native_window *shim_get_native_window(void) {
   return &g_win;
 }
 
+/* ================= KMS direct scanout (R36S / ULTRAKILL_KMS_DIRECT) =========
+ * GBM esta morto nessa firmware (ark sem acesso a renderD128 e os libgbm do
+ * rootfs sao o blob disfarçado). Mas card0 funciona - e o que o ES usa.
+ * Criamos um dumb buffer fullscreen e escrevemos nele direto (nearest scale
+ * do pbuffer RGBA). Um drmModeSetCrtc no primeiro frame assume o display;
+ * ao sair, o ES repoe o proprio fb (NO_ATIMMUTAL_FB ajuda). */
+typedef struct {
+  int fd;
+  uint32_t crtc, conn_id, fb, handle, pitch, w, h;
+  void *map;
+  uint64_t size;
+  int ready;
+} kms_out;
+static kms_out g_kms;
+
+static int kms_open(int src_w, int src_h) {
+  kms_out *k = &g_kms;
+  k->fd = open("/dev/dri/card0", O_RDWR | O_CLOEXEC);
+  if (k->fd < 0) {
+    fprintf(stderr, "kms: open card0 falhou: %s\n", strerror(errno));
+    return -1;
+  }
+  drmModeRes *res = drmModeGetResources(k->fd);
+  if (!res) { fprintf(stderr, "kms: GetResources fail\n"); return -1; }
+  drmModeConnector *conn = NULL;
+  for (int i = 0; i < res->count_connectors && !conn; i++) {
+    drmModeConnector *c = drmModeGetConnector(k->fd, res->connectors[i]);
+    if (c && c->connection == DRM_MODE_CONNECTED && c->count_modes > 0) conn = c;
+    else if (c) drmModeFreeConnector(c);
+  }
+  if (!conn) { fprintf(stderr, "kms: nenhum conector\n"); return -1; }
+  uint32_t crtc = res->crtcs[0];
+  drmModeEncoder *enc = drmModeGetEncoder(k->fd, conn->encoder_id);
+  if (enc) { if (enc->crtc_id) crtc = enc->crtc_id; drmModeFreeEncoder(enc); }
+  drmModeModeInfo *mode = &conn->modes[conn->preferred_mode < conn->count_modes
+                                            ? conn->preferred_mode : 0];
+  k->w = mode->hdisplay; k->h = mode->vdisplay; k->conn_id = conn->connector_id;
+  struct drm_mode_create_dumb cd;
+  memset(&cd, 0, sizeof cd);
+  cd.width = k->w; cd.height = k->h; cd.bpp = 32;
+  if (ioctl(k->fd, DRM_IOCTL_MODE_CREATE_DUMB, &cd)) {
+    fprintf(stderr, "kms: CREATE_DUMB fail: %s\n", strerror(errno)); return -1;
+  }
+  k->handle = cd.handle; k->pitch = cd.pitch; k->size = cd.size;
+  struct drm_mode_map_dumb md;
+  memset(&md, 0, sizeof md);
+  md.handle = cd.handle;
+  if (ioctl(k->fd, DRM_IOCTL_MODE_MAP_DUMB, &md)) {
+    fprintf(stderr, "kms: MAP_DUMB fail: %s\n", strerror(errno)); return -1;
+  }
+  k->map = mmap(0, k->size, PROT_READ | PROT_WRITE, MAP_SHARED, k->fd, md.offset);
+  if (k->map == MAP_FAILED) { fprintf(stderr, "kms: mmap fail\n"); return -1; }
+  if (drmModeAddFB(k->fd, k->w, k->h, 24, 32, k->pitch, k->handle, &k->fb)) {
+    fprintf(stderr, "kms: AddFB fail\n"); return -1;
+  }
+  if (drmModeSetCrtc(k->fd, crtc, k->fb, 0, 0, &k->conn_id, 1, mode)) {
+    fprintf(stderr, "kms: SetCrtc fail\n"); return -1;
+  }
+  k->crtc = crtc;
+  k->ready = 1;
+  fprintf(stderr, "kms: scanout %ux%u assumido (source %dx%d)\n",
+          k->w, k->h, src_w, src_h);
+  return 0;
+}
+
+static void kms_flip(const unsigned char *rgba, int sw, int sh) {
+  kms_out *k = &g_kms;
+  if (!k->ready || !rgba || sw <= 0 || sh <= 0) return;
+  unsigned char *base = (unsigned char *)k->map;
+  for (uint32_t y = 0; y < k->h; y++) {
+    uint32_t sy = (uint32_t)((uint64_t)y * sh / k->h); if (sy >= (uint32_t)sh) sy = sh - 1;
+    const unsigned char *srow = rgba + (size_t)sy * sw * 4;
+    unsigned char *drow = base + (size_t)y * k->pitch;
+    for (uint32_t x = 0; x < k->w; x++) {
+      uint32_t sx = (uint32_t)((uint64_t)x * sw / k->w); if (sx >= (uint32_t)sw) sx = sw - 1;
+      const unsigned char *p = srow + (size_t)sx * 4;
+      /* GL RGBA -> XRGB8888 little-endian (bytes B,G,R,X) */
+      drow[x*4+0] = p[2]; drow[x*4+1] = p[1]; drow[x*4+2] = p[0]; drow[x*4+3] = 0xff;
+    }
+  }
+}
+
 shim_gl_status shim_gl_init(shim_gl_ctx *out, int w, int h, const char *title) {
   memset(out, 0, sizeof(*out));
 
@@ -275,7 +366,15 @@ shim_gl_status shim_gl_init(shim_gl_ctx *out, int w, int h, const char *title) {
   if (no_sdl_gl) {
     if (p_eglGetProcAddress_real)
       p_glReadPixels = (PFN_glReadPixels)p_eglGetProcAddress_real("glReadPixels");
-    if (p_glReadPixels) {
+    /* KMS direto primeiro (evita SDL_CreateRenderer que SEGFAULTa no
+     * driver offscreen dessa SDL). */
+    if (p_glReadPixels && getenv("ULTRAKILL_KMS_DIRECT")) {
+      if (kms_open(w, h) == 0) {
+        out->pixel_buf = malloc((size_t)w * h * 4);
+        out->kms_ready = 1;
+      }
+    }
+    if (p_glReadPixels && !out->kms_ready) {
       SDL_Renderer *r = SDL_CreateRenderer(out->sdl, -1, SDL_RENDERER_SOFTWARE);
       if (r) {
         SDL_Texture *t = SDL_CreateTexture(r, SDL_PIXELFORMAT_ABGR8888,
@@ -301,8 +400,13 @@ shim_gl_status shim_gl_init(shim_gl_ctx *out, int w, int h, const char *title) {
 }
 
 void shim_gl_present(shim_gl_ctx *c) {
-  if (!c || !p_glReadPixels || !c->sdl_renderer || !c->sdl_texture || !c->pixel_buf)
+  if (!c || !p_glReadPixels || !c->pixel_buf) return;
+  if (c->kms_ready) {
+    p_glReadPixels(0, 0, c->width, c->height, GL_RGBA, GL_UNSIGNED_BYTE, c->pixel_buf);
+    kms_flip((const unsigned char *)c->pixel_buf, c->width, c->height);
     return;
+  }
+  if (!c->sdl_renderer || !c->sdl_texture) return;
   SDL_Renderer  *r = (SDL_Renderer *)c->sdl_renderer;
   SDL_Texture   *t = (SDL_Texture  *)c->sdl_texture;
   p_glReadPixels(0, 0, c->width, c->height, GL_RGBA, GL_UNSIGNED_BYTE, c->pixel_buf);
