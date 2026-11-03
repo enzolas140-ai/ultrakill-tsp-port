@@ -74,11 +74,54 @@ jobs:
         if: ${{ false }}   # done inside the bullseye container above
         run: true
 
+      - name: gl stack software (glvnd+mesa llvmpipe) do bullseye
+        # R36S/ArkOS4Clone: TODOS os sonames GL apontam pro blob bifrost
+        # errado e o mesa local so tem vendor glvnd (sem API publica).
+        # Embarcar stack completo em libs/arm64/glvndstack/: dispatcher
+        # glvnd + libEGL_mesa + swrast(llvmpipe) + gbm + deps. Lento mas
+        # real e INDEPENDENTE do kernel/driver da firmware.
+        run: |
+          docker run --rm -v "$PWD:/src" -w /tmp public.ecr.aws/debian/debian:bullseye-slim bash -ec '
+            set -e
+            sed -i "s|deb.debian.org|archive.debian.org|g;s|security.debian.org|archive.debian.org|g" /etc/apt/sources.list 2>/dev/null || true
+            apt-get -o Acquire::Check-Valid-Until=false update
+            mkdir -p /tmp/dls && cd /tmp/dls
+            apt-get download libegl1 libglvnd0 libegl-mesa0 libgles2 libglapi-mesa libgbm1 libdrm2 libexpat1 liblz4-1 libzstd1 libllvm11 libgl1-mesa-dri || true
+            ls *.deb | wc -l
+            mkdir -p x && cd x
+            for d in /tmp/dls/*.deb; do dpkg-deb -x "$d" .; done
+            S=/src/ultrakill_port/libs/arm64/glvndstack
+            mkdir -p $S/dri $S/glvnd
+            A=usr/lib/aarch64-linux-gnu
+            cp -Lv $A/libEGL.so.1* $S/ 2>/dev/null || true
+            cp -Lv $A/libEGL_mesa.so.0* $S/ 2>/dev/null || true
+            cp -Lv $A/libGLESv1_CM.so.1* $A/libGLESv2.so.2* $S/ 2>/dev/null || true
+            cp -Lv $A/libGLdispatch.so.0* $A/libGLX.so.0* $S/ 2>/dev/null || true
+            cp -Lv $A/libgbm.so.1* $A/libdrm.so.2* $A/libexpat.so.1* $S/ 2>/dev/null || true
+            cp -Lv $A/liblz4.so.1* $A/libzstd.so.1* $A/libglapi.so.0* $S/ 2>/dev/null || true
+            cp -Lv usr/lib/llvm-11/lib/libLLVM-11.so* $A/libLLVM-11.so* $S/ 2>/dev/null || true
+            cp -Lv $A/dri/swrast_dri.so $A/dri/kms_swrast_dri.so $S/dri/ 2>/dev/null || true
+            cp -v usr/share/glvnd/egl_vendor.d/50_mesa.json $S/glvnd/ 2>/dev/null || true
+            find $S -maxdepth 1 -name "*.so*" | grep -v glvndstack || true
+            du -sh $S
+          '
+          python3 - <<'PYEOF'
+          import json, os
+          p = "ultrakill_port/libs/arm64/glvndstack/glvnd/50_mesa.json"
+          if os.path.exists(p):
+              d = json.load(open(p))
+              base = os.path.abspath("ultrakill_port/libs/arm64/glvndstack")
+              d["ICD"]["library_path"] = os.path.join(base, d["ICD"]["library_path"])
+              json.dump(d, open(p, "w"), indent=2)
+              print("vendor json ->", d["ICD"]["library_path"])
+          PYEOF
+          ls -la ultrakill_port/libs/arm64/glvndstack/
+
       - name: collect artifacts
         working-directory: ultrakill_port
         run: |
           mkdir -p /tmp/out
-          cp -v libs/arm64/*                        /tmp/out/
+          cp -rv libs/arm64/*                       /tmp/out/
           cp -v gamedata/bin/ultrakill             /tmp/out/
           cp -v wrapper/build-arm64/input_probe     /tmp/out/
           cp -v wrapper/build-arm64/symbol_probe    /tmp/out/ 2>/dev/null || true
