@@ -44,6 +44,9 @@ typedef unsigned char EGLBoolean;
 #define EGL_OPENGL_ES3_BIT  0x0040
 #define EGL_SURFACE_TYPE    0x3033
 #define EGL_WINDOW_BIT      0x0004
+#define EGL_PBUFFER_BIT     0x0001
+#define EGL_WIDTH           0x3057
+#define EGL_HEIGHT          0x3056
 #define EGL_RED_SIZE        0x3024
 #define EGL_GREEN_SIZE      0x3023
 #define EGL_BLUE_SIZE       0x3022
@@ -160,7 +163,7 @@ shim_gl_status shim_gl_init(shim_gl_ctx *out, int w, int h, const char *title) {
    * modo NAO pedimos GL ao SDL (sem SDL_WINDOW_OPENGL - senao o crash e la
    * dentro); o EGL e criado 100% por nos com Pbuffer + o shim entrega essa
    * surface ao Unity quando ele chama eglCreateWindowSurface. */
-  static int no_sdl_gl = getenv("ULTRAKILL_NO_SDL_GL") != NULL;
+  int no_sdl_gl = getenv("ULTRAKILL_NO_SDL_GL") != NULL;
 
   SDL_Window *win = SDL_CreateWindow(title ? title : "ULTRAKILL",
                                      SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED,
