@@ -4849,6 +4849,16 @@ static BenderEGLBoolean bender_eglChooseConfig(BenderEGLDisplay d,const BenderEG
      * EGL_WINDOW_BIT = ZERO -> o Unity recebe num=0, nao tem GFX device e chama
      * UnityPlayer.kill() no primeiro nativeRender (visto no log do device).
      * Re-consulta forcando EGL_PBUFFER_BIT: pbuffer e render target completo. */
+    {
+        char abuf[640];size_t apos=(size_t)snprintf(abuf,sizeof(abuf),
+            "[BENDER_EGL][CHOOSE_CONFIG][RAW][ATTRS] dpy=%d cfgs=%d", (int)(uintptr_t)d, (int)config_size);
+        if(attrs){for(int q=0;q<64;q+=2){BenderEGLint at=attrs[q];if(at==BENDER_EGL_NONE)break;
+            if(apos+24u<sizeof(abuf)){int an=snprintf(abuf+apos,sizeof(abuf)-apos," 0x%x=%d",at,attrs[q+1]);
+                if(an>0){size_t add=(size_t)an;apos+=(add<sizeof(abuf)-apos-1u)?add:(sizeof(abuf)-apos-1u);}}}}
+        else apos+=(size_t)snprintf(abuf+apos,sizeof(abuf)-apos," (null)");
+        if(apos>=sizeof(abuf))apos=sizeof(abuf)-1;abuf[apos]=0;
+        logmsg("%s configs=%p\n",abuf,(void*)configs);
+    }
     BenderEGLBoolean rc=f(d,attrs,configs,config_size,num);
     int raw_num=(rc&&num)?*num:0;
     logmsg("[BENDER_EGL][CHOOSE_CONFIG][RAW] rc=%u num=%d err=0x%x\n",rc,raw_num,(unsigned)bender_host_egl_error());
@@ -4891,6 +4901,23 @@ static BenderEGLBoolean bender_eglChooseConfig(BenderEGLDisplay d,const BenderEG
             }
         }
         logmsg("[BENDER_EGL][CHOOSE_CONFIG][FORCED_PBUFFER][FAIL] nenhuma lista pbuffer foi aceita\n");
+        /* ULTRAKILL: o Mesa surfaceless comeca a devolver BAD_ATTRIBUTE ate para
+         * lista minima depois que o Unity monta o GFX device. Ele so precisa de
+         * UM config valido; devolvemos o pbuffer que ja achamos antes. */
+        if(g_bender_pb_cfg_ok){
+            if(configs&&config_size>0)configs[0]=g_bender_pb_cfg;
+            if(num)*num=1;
+            bender_host_egl_error();
+            logmsg("[BENDER_EGL][CHOOSE_CONFIG][REUSE_CACHED_CONFIG] cfg=%p num=1\n",(void*)g_bender_pb_cfg);
+            return BENDER_EGL_TRUE;
+        }
+    }
+    if(g_bender_pb_cfg_ok&&(!rc||raw_num==0)){
+        if(configs&&config_size>0)configs[0]=g_bender_pb_cfg;
+        if(num)*num=1;
+        bender_host_egl_error();
+        logmsg("[BENDER_EGL][CHOOSE_CONFIG][REUSE_CACHED_CONFIG] (pos-crua) cfg=%p num=1\n",(void*)g_bender_pb_cfg);
+        return BENDER_EGL_TRUE;
     }
     return rc;
 }
