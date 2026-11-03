@@ -82,8 +82,16 @@ int main(int argc, char **argv, char **envp) {
   snprintf(gamedir, sizeof gamedir, "%s/gamedata", portdir);
 
   /* ---- 1. AAssetManager que le do filesystem ---- */
-  setenv("ULTRAKILL_ASSET_ROOT", gamedir, 1);
-  AAssetManager *mgr = shim_AAssetManager_fromPath(gamedir);
+  /* Se o launcher ja exportou ULTRAKILL_ASSET_ROOT (layout unity_payload/
+   * assets/, igual ao dos ports BENDER que funcionam na R36S), RESPEITA.
+   * Sem isso sobrescreviamos o root e o bridge legado nao achava o payload
+   * reorganizado. */
+  const char *aroot = getenv("ULTRAKILL_ASSET_ROOT");
+  if (!aroot || !*aroot) {
+    setenv("ULTRAKILL_ASSET_ROOT", gamedir, 1);
+    aroot = gamedir;
+  }
+  AAssetManager *mgr = shim_AAssetManager_fromPath(aroot);
   if (!mgr) { fprintf(stderr, "asset mgr fail\n"); return 2; }
 
   /* ---- 2. ALooper na thread main ---- */

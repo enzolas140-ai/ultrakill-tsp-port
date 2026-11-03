@@ -56,6 +56,22 @@ jobs:
               build-essential cmake pkg-config ninja-build \
               libsdl2-dev zlib1g libdrm-dev
             ./build.sh arm64
+            # ============================================================
+            # BENDER Unity IL2CPP AArch64 loader - o MESMO mechanism que faz
+            # 60 Parsecs e Cuphead rodarem nesta firmware (engenharia reversa
+            # feita em /roms/ports/60_parsecs_v1_3_6_patched/unity_probe_source,
+            # re-identificado p/ arkboxgames.ultrakill em ultrakill_port/bender).
+            # Compilado no MESMO bullseye (glibc 2.31) para nao exigir GLIBC
+            # nova no ArkOS4Clone da R36S.
+            # ============================================================
+            cd /src/ultrakill_port
+            mkdir -p bender/out audio_bridge
+            gcc -O2 -fPIE -pie -w bender/unity_probe.c -o bender/out/unity_probe.aarch64 -ldl -pthread
+            gcc -O2 -fPIC -shared -w bender/bender_opensles.c -o audio_bridge/libOpenSLES.so -ldl -pthread
+            ls -la bender/out audio_bridge
+            readelf -h bender/out/unity_probe.aarch64 | grep -E 'Class|Machine|Type'
+            readelf --version-info bender/out/unity_probe.aarch64 | grep -o 'GLIBC_[0-9.]*' | sort -Vu | tail -3
+            cd /src/ultrakill_port/wrapper
             # zlib fisicamente ausente no ArkOS - embalamos junto (<=2.31)
             Z=$(ls /usr/lib/aarch64-linux-gnu/libz.so.1* /lib/aarch64-linux-gnu/libz.so.1* 2>/dev/null | head -1)
             echo "zlib encontrado: [$Z]"
@@ -124,6 +140,8 @@ jobs:
         run: |
           mkdir -p /tmp/out
           cp -rv libs/arm64/*                       /tmp/out/
+          cp -v bender/out/unity_probe.aarch64      /tmp/out/
+          cp -v audio_bridge/libOpenSLES.so         /tmp/out/audio_bridge_libOpenSLES.so
           cp -v gamedata/bin/ultrakill             /tmp/out/
           cp -v wrapper/build-arm64/input_probe     /tmp/out/
           cp -v wrapper/build-arm64/egltest         /tmp/out/
@@ -150,6 +168,8 @@ jobs:
             ultrakill-built-arm64.tar.gz
             ultrakill_port/libs/arm64/**
             ultrakill_port/gamedata/bin/ultrakill
+            ultrakill_port/bender/out/unity_probe.aarch64
+            ultrakill_port/audio_bridge/libOpenSLES.so
             ultrakill_port/wrapper/build-arm64/egltest
           retention-days: 30
 
