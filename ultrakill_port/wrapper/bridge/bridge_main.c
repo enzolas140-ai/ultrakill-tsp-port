@@ -256,6 +256,9 @@ int main(int argc, char **argv, char **envp) {
         while (frames < 600) {   /* ~10 min de teste; quit via nativeDone */
           int cont = ((Fn_Z_noargs)fnRender)(env, NULL);
           frames++;
+          /* NO_SDL_GL (R36S): SDL nao viu GL, enta copiamos o pbuffer
+           * pro KMS por conta propria a cada frame. */
+          shim_gl_present(&glc);
           if (frames % 300 == 0)
             fprintf(stderr, "[render] frames=%ld cont=%d\n", frames, cont);
           if (!cont) { fprintf(stderr, "[render] QuitRequested -> sai\n"); break; }

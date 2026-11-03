@@ -30,11 +30,20 @@ typedef struct shim_gl_ctx {
   int                width, height;
   /* Nosso ANativeWindow fake (mesmo tipo usado em activity->window): */
   struct ANativeWindow *fake;
+  /* Modo ULTRAKILL_NO_SDL_GL (R36S): copia o Pbuffer GL pra tela via
+   * SDL software renderer (KMS dumb buffer), sem SDL/GLX/EGL window. */
+  void              *sdl_renderer;   /* SDL_Renderer*  */
+  void              *sdl_texture;    /* SDL_Texture*   */
+  void              *pixel_buf;      /* RGBA w*h*4     */
 } shim_gl_ctx;
 
 /* Cria SDL window + EGL context com client API GLES3 (fallback GLES2).
  * Retorna SHIM_GL_OK / zero se OK, negativo se erro. */
 shim_gl_status shim_gl_init(shim_gl_ctx *out, int w, int h, const char *title);
+
+/* glReadPixels do pbuffer -> SDL_UpdateTexture -> RenderPresent.
+ * No-op se modo normal (TSP) ou se renderer nao criado. */
+void shim_gl_present(shim_gl_ctx *c);
 
 /* Marca destroy (chamar no shutdown). */
 void shim_gl_shutdown(shim_gl_ctx *c);

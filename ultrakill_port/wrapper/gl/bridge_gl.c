@@ -71,6 +71,11 @@ typedef EGLBoolean (*PFN_eglSwapBuffers)(EGLDisplay, EGLSurface);
 typedef EGLBoolean (*PFN_eglBindAPI)(EGLenum);
 typedef const char*(*PFN_eglQueryString)(EGLDisplay, int);
 typedef EGLint     (*PFN_eglGetError)(void);
+typedef void*      (*PFN_eglGetProcAddress)(const char*);
+/* GL core via eglGetProcAddress (so o que o present precisa): */
+typedef void       (*PFN_glReadPixels)(int,int,int,int,unsigned int,unsigned int,void*);
+#define GL_RGBA         0x1908
+#define GL_UNSIGNED_BYTE 0x1401
 
 static PFN_eglGetDisplay              p_eglGetDisplay;
 static PFN_eglInitialize              p_eglInitialize;
@@ -83,6 +88,8 @@ static PFN_eglSwapBuffers             p_eglSwapBuffers;
 static PFN_eglBindAPI                 p_eglBindAPI;
 static PFN_eglQueryString             p_eglQueryString;
 static PFN_eglGetError                p_eglGetError;
+static PFN_eglGetProcAddress          p_eglGetProcAddress_real;
+static PFN_glReadPixels               p_glReadPixels;
 
 static int load_egl(void) {
   /* IMPORTANTE: nunca use "libEGL.so" sem sufixo de versao aqui. Nosso
@@ -120,6 +127,7 @@ static int load_egl(void) {
   p_eglCreatePbufferSurface = (PFN_eglCreatePbufferSurface)dlsym(h, "eglCreatePbufferSurface");
   if (!p_eglCreatePbufferSurface)
     fprintf(stderr, "bridge_gl: eglCreatePbufferSurface ausente (ok se nao usar ULTRAKILL_NO_SDL_GL)\n");
+  p_eglGetProcAddress_real = (PFN_eglGetProcAddress)dlsym(h, "eglGetProcAddress");
 #undef LOAD
   return 0;
 }
@@ -261,8 +269,51 @@ shim_gl_status shim_gl_init(shim_gl_ctx *out, int w, int h, const char *title) {
   g_win.on_swap      = NULL;
   out->fake = (struct ANativeWindow*)&g_win;
 
+  /* ULTRAKILL_NO_SDL_GL: pipeline de apresentacao pbuffer->CPU->KMS.
+   * SDL_RENDERER_SOFTWARE nao toca EGL/GLX de forma alguma (dumb buffer
+   * + memcpy), entao convive com o mesa-EGL nosso sem o crash do loader. */
+  if (no_sdl_gl) {
+    if (p_eglGetProcAddress_real)
+      p_glReadPixels = (PFN_glReadPixels)p_eglGetProcAddress_real("glReadPixels");
+    if (p_glReadPixels) {
+      SDL_Renderer *r = SDL_CreateRenderer(out->sdl, -1, SDL_RENDERER_SOFTWARE);
+      if (r) {
+        SDL_Texture *t = SDL_CreateTexture(r, SDL_PIXELFORMAT_ABGR8888,
+                                           SDL_TEXTUREACCESS_STREAMING, w, h);
+        if (t) {
+          out->sdl_renderer = r; out->sdl_texture = t;
+          out->pixel_buf = malloc((size_t)w * h * 4);
+          fprintf(stderr, "bridge_gl: present pipeline pronto (leia-se: havera imagem)\n");
+        } else {
+          SDL_DestroyRenderer(r);
+          fprintf(stderr, "bridge_gl: SDL_CreateTexture falhou: %s\n", SDL_GetError());
+        }
+      } else {
+        fprintf(stderr, "bridge_gl: SDL_CreateRenderer falhou: %s\n", SDL_GetError());
+      }
+    } else {
+      fprintf(stderr, "bridge_gl: glReadPixels indisponivel; so offscreen\n");
+    }
+  }
+
   fprintf(stderr, "bridge_gl: ok %dx%d, GL ver=%s\n", w, h, gl_version_probe());
   return SHIM_GL_OK;
+}
+
+void shim_gl_present(shim_gl_ctx *c) {
+  if (!c || !p_glReadPixels || !c->sdl_renderer || !c->sdl_texture || !c->pixel_buf)
+    return;
+  SDL_Renderer  *r = (SDL_Renderer *)c->sdl_renderer;
+  SDL_Texture   *t = (SDL_Texture  *)c->sdl_texture;
+  p_glReadPixels(0, 0, c->width, c->height, GL_RGBA, GL_UNSIGNED_BYTE, c->pixel_buf);
+  int stride = c->width * 4;
+  /* GL lê de baixo pra cima; pitch negativo vira a imagem numa passada. */
+  SDL_UpdateTexture(t, NULL,
+                    (char *)c->pixel_buf + (size_t)stride * (c->height - 1),
+                    -stride);
+  SDL_RenderClear(r);
+  SDL_RenderCopy(r, t, NULL, NULL);
+  SDL_RenderPresent(r);
 }
 
 void shim_gl_swap(shim_gl_ctx *c) {
