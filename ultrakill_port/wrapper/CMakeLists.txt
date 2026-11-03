@@ -26,6 +26,8 @@ include_directories(
 find_package(PkgConfig REQUIRED)
 pkg_check_modules(SDL2 REQUIRED sdl2)
 include_directories(${SDL2_INCLUDE_DIRS})
+# libdrm (KMS direct scanout no bridge_gl.c)
+include_directories(/usr/include/libdrm)
 
 # --------------------------------------------------------------- liblog
 add_library(log_stub SHARED stubs/android_log_stub.c)
@@ -77,7 +79,6 @@ target_link_libraries(bridge
     android_stub
     dl m pthread drm)
 target_link_directories(bridge PRIVATE ${SDL2_LIBRARY_DIRS})
-target_include_directories(bridge PRIVATE /usr/include/libdrm)
 # -rdynamic (export-dynamic): faz shim_get_native_window visivel via
 # dlsym(RTLD_DEFAULT,...) a partir do bridge_egl_shim carregado depois.
 set_target_properties(bridge PROPERTIES
@@ -104,7 +105,7 @@ if(ULTRAKILL_BUILD_TESTS)
     bridge/bridge_input.c
     gl/bridge_gl.c)
   target_link_libraries(input_probe
-    PRIVATE ${SDL2_LIBRARIES} dl m pthread)
+    PRIVATE ${SDL2_LIBRARIES} dl m pthread drm)
   target_link_directories(input_probe PRIVATE ${SDL2_LIBRARY_DIRS})
   set_target_properties(input_probe PROPERTIES
     # -rdynamic: p/ os checks de dlsym(RTLD_DEFAULT) no proprio teste

@@ -29,6 +29,7 @@
 #include <errno.h>
 #include <stdint.h>
 #include <xf86drm.h>
+#include <xf86drmMode.h>
 #include <drm.h>
 
 #include <SDL.h>
