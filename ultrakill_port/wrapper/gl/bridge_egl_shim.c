@@ -168,7 +168,38 @@ FWD(EGLBoolean, eglInitialize,
     (EGLDisplay dpy, EGLint *mj, EGLint *mn), (dpy, mj, mn), EGL_FALSE)
 FWD(EGLBoolean, eglTerminate, (EGLDisplay dpy), (dpy), EGL_FALSE)
 FWD(EGLint,     eglGetError, (void), (), EGL_SUCCESS)
-FWD(EGLDisplay, eglGetDisplay, (EGLNativeDisplayType nt), (nt), EGL_NO_DISPLAY)
+
+/* ---- normalizacao SURFACELESS (R36S/ArkOS4Clone) ----
+ * SDL kmsdrm passa gbm_device* ao eglGetDisplay; o loader gbm do mesa dessa
+ * firmware crasha (strcmp ponteiro lixo). Com ULTRAKILL_EGL_SURFACELESS=1
+ * TODOS (SDL, Unity, bridge) recebem o mesmo display surfaceless criado com
+ * eglGetDisplay(NULL) - comprovado vivo pelo egltest (ES 3.2 swrast). */
+static int shim_surfaceless_forced(void) {
+  const char *e = getenv("ULTRAKILL_EGL_SURFACELESS");
+  return e && *e && strcmp(e, "0") != 0;
+}
+static EGLDisplay shim_surfaceless_display(void) {
+  static EGLDisplay cached = EGL_NO_DISPLAY;
+  if (cached == EGL_NO_DISPLAY) {
+    typedef EGLDisplay (*gdfn)(EGLNativeDisplayType);
+    gdfn g = (gdfn)sym("eglGetDisplay");
+    if (g) cached = g(NULL);
+  }
+  return cached;
+}
+
+__attribute__((visibility("default")))
+EGLDisplay eglGetDisplay(EGLNativeDisplayType native) {
+  ensure_real();
+  static EGLDisplay (*rg)(EGLNativeDisplayType);
+  if (!rg) rg = (EGLDisplay (*)(EGLNativeDisplayType))sym("eglGetDisplay");
+  if (!rg) return EGL_NO_DISPLAY;
+  if (shim_surfaceless_forced()) {
+    EGLDisplay d = shim_surfaceless_display();
+    if (d) return d;
+  }
+  return rg(native);
+}
 FWD(EGLBoolean, eglBindAPI, (EGLenum api), (api), EGL_FALSE)
 FWD(EGLenum,    eglQueryAPI, (void), (), 0)
 FWD(EGLBoolean, eglChooseConfig,
@@ -215,8 +246,17 @@ FWD(int, eglClientWaitSync, (EGLDisplay dpy, void *sync, int flags, EGLTime t), 
 FWD(EGLBoolean, eglGetSyncAttrib, (EGLDisplay dpy, void *sync, int attr, EGLint *val), (dpy, sync, attr, val), EGL_FALSE)
 
 /* EGL 1.4 */
-FWD(EGLDisplay, eglGetPlatformDisplay,
+FWD(EGLDisplay, eglGetPlatformDisplay_real,
     (EGLenum plat, void *ndisp, const EGLint *att), (plat, ndisp, att), EGL_NO_DISPLAY)
+__attribute__((visibility("default")))
+EGLDisplay eglGetPlatformDisplay(EGLenum plat, void *ndisp, const EGLint *att) {
+  ensure_real();
+  if (shim_surfaceless_forced()) {
+    EGLDisplay d = shim_surfaceless_display();
+    if (d) return d;
+  }
+  return eglGetPlatformDisplay_real(plat, ndisp, att);
+}
 /* eglGetPlatformDisplayEXT definido logo abaixo (sintetiza o device EXT p/ SDL offscreen) */
 
 /* EGL 1.5 */
@@ -271,6 +311,10 @@ __attribute__((visibility("default")))
 EGLDisplay eglGetPlatformDisplayEXT(EGLenum platform, void *native_display,
                                      const EGLint *attrib_list) {
   ensure_real();
+  if (shim_surfaceless_forced()) {
+    EGLDisplay d = shim_surfaceless_display();
+    if (d) return d;
+  }
   static PFN_gpdEXT real; if (!real) real = (PFN_gpdEXT)sym("eglGetPlatformDisplayEXT");
   /* traduz o sentinel pra EGL_DEFAULT_DISPLAY (0) - ai o driver real aceita */
   void *nd = (native_display == SHIM_EGL_DEVICE_SENTINEL) ? NULL : native_display;
