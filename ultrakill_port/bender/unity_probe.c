@@ -10416,8 +10416,17 @@ logmsg("[BENDER_FN_FALLBACK][ARMED] version=2.7.173 modifier=FN|L1+R1 native_fn_
                             if(loaded&&um&&um->init_state==2)logmsg("[UNITY_PROBE][NATIVE_LOAD_UNITY][OK] libunity constructors + JNI_OnLoad atravessados; libil2cpp permaneceu bloqueada propositalmente.\n");
                             else logmsg("[UNITY_PROBE][NATIVE_LOAD_UNITY][WARN] libunity nao concluiu de forma limpa.\n");
                         } else {
-                            if(loaded&&um&&um->init_state==2&&im&&im->init_state==2){
-                                logmsg("[UNITY_PROBE][NATIVE_LOAD][OK] libunity + libil2cpp atravessaram NativeLoader.load.\n");
+                            /* ULTRAKILL (Unity 2019.4): libunity.so so faz dlopen
+                             * de libil2cpp.so DENTRO de UnityPlayer.initJni, nao
+                             * durante NativeLoader.load (no Unity 6 do port modelo
+                             * ele ja vem aqui). O gate antigo exigia
+                             * im->init_state==2 e derrubava a escada inteira com
+                             * "retornou sem concluir os dois init_array". Aceitar
+                             * init_state==0 quando o init do il2cpp esta liberado
+                             * (want_native_all) - ele roda sozinho no initJni. */
+                            if(loaded&&um&&um->init_state==2&&im&&(im->init_state==2||g_guest_allow_il2cpp_init)){
+                                logmsg("[UNITY_PROBE][NATIVE_LOAD][OK] libunity + libil2cpp atravessaram NativeLoader.load (il2cpp_init=%d%s).\n",
+                                       im->init_state,im->init_state==2?"":"; il2cpp sera carregado no initJni (Unity 2019.x)");
                                 bender_application_paths_install_2772(im);
                                 if(g_bender_application_paths_installed_2772)bender_content_async_install_2773(im);
                                 if(g_bender_application_paths_installed_2772)bender_fix12_install_2812(im);
