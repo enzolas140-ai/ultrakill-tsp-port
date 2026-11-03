@@ -158,18 +158,32 @@ static void bender_panel_log_transport_init(void){
     g_bender_panel_log_nonblock=1;
 }
 
+/* ULTRAKILL: o cartao e exFAT sem journal e o device perde o cache se for
+ * desligado/puxado sem ejectar (foi assim que dois unity_probe.log sumiram).
+ * Empurra o log para a midia de tempos em tempos - custo desprezivel perto
+ * de um frame em llvmpipe. BENDER_UK_LOG_SYNC=0 desliga. */
+static void bender_log_flush_media(int fd) {
+    static unsigned long writes;
+    static int off=-1;
+    if(off!=0){ const char*e=getenv("BENDER_UK_LOG_SYNC"); if(e&&!strcmp(e,"0"))off=0; }
+    if(off==0) return;
+    if(++writes % 24ul) return;
+    fsync(fd);   /* unistd.h sempre declara; seguro em qualquer glibc */
+}
 static void bender_log_write_best_effort(int fd,const char*buf,size_t len){
     if(fd<0||!buf||len==0)return;
     size_t off=0;
+    int wrote=0;
     while(off<len){
         ssize_t wr=write(fd,buf+off,len-off);
-        if(wr>0){off+=(size_t)wr;continue;}
+        if(wr>0){off+=(size_t)wr;wrote=1;continue;}
         if(wr<0&&errno==EINTR)continue;
         if(wr<0&&(errno==EAGAIN||errno==EWOULDBLOCK)){
             __atomic_add_fetch(&g_bender_panel_log_dropped,1ul,__ATOMIC_RELAXED);
         }
         break;
     }
+    if(wrote) bender_log_flush_media(fd);
 }
 
 static void logmsg(const char *fmt, ...) {
@@ -5779,6 +5793,27 @@ static int uk_kms_init(int src_w, int src_h) {
     if (!g_uk_buf) { uk_kms_log("sem buffer de readback"); return -1; }
     logmsg("[BENDER_UK_KMS] scanout %ux%u assumido em %s (source %dx%d pitch=%u)\n",
            g_uk_w, g_uk_h, dev, src_w, src_h, g_uk_pitch);
+    /* PADRAO DE TESTE: se isto aparecer na tela, o caminho de video esta vivo
+     * e a tela preta e culpa do conteudo (readback/shader), nao do display. */
+    {
+        unsigned char *base = (unsigned char *)g_uk_map;
+        unsigned yy, xx;
+        for (yy = 0; yy < g_uk_h; yy++) {
+            unsigned char *row = base + (size_t)yy * g_uk_pitch;
+            for (xx = 0; xx < g_uk_w; xx++) {
+                unsigned char *px = row + (size_t)xx * 4u;
+                if (yy < 24u) {
+                    px[0]=0xff; px[1]=0xff; px[2]=0xff;   /* tarja branca */
+                } else {
+                    px[0]=(unsigned char)(xx * 255u / (g_uk_w?g_uk_w:1));
+                    px[1]=(unsigned char)(yy * 255u / (g_uk_h?g_uk_h:1));
+                    px[2]=(unsigned char)(255u - (xx * 255u / (g_uk_w?g_uk_w:1)));
+                }
+                px[3]=0xff;
+            }
+        }
+        logmsg("[BENDER_UK_KMS] padrao de teste pintado (branco no topo + degre RGB). Se a tela mostrar ISTO e depois pretar, o video esta OK.\n");
+    }
     return 0;
 }
 
@@ -5826,9 +5861,15 @@ static void uk_kms_present(int w, int h) {
         }
     }
     g_uk_kms_swaps++;
-    if (g_uk_kms_swaps <= 3u || g_uk_kms_swaps % 120u == 0u)
-        logmsg("[BENDER_UK_KMS] frame=%lu readback=%dx%d -> %ux%u\n",
-               g_uk_kms_swaps, w, h, g_uk_w, g_uk_h);
+    {
+        /* quantos pixels tem algo? zero absoluto = Unity nao esta desenhando
+         * no nosso read buffer (shader stub / FBO errado / pbuffer alheio). */
+        size_t total = (size_t)w * (size_t)h * 4u, nz = 0, k;
+        for (k = 0; k < total; k++) if (g_uk_buf[k]) { nz++; }
+        if (g_uk_kms_swaps <= 5u || g_uk_kms_swaps % 300u == 0u)
+            logmsg("[BENDER_UK_KMS] frame=%lu readback=%dx%d -> %ux%u bytes_iguais_zero=%zu/%zu\n",
+                   g_uk_kms_swaps, w, h, g_uk_w, g_uk_h, total - nz, total);
+    }
 }
 
 static BenderEGLBoolean bender_eglSwapBuffers(BenderEGLDisplay d,BenderEGLSurface s){
