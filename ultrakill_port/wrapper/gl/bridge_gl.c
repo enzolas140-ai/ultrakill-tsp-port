@@ -62,6 +62,7 @@ typedef EGLBoolean (*PFN_eglInitialize)(EGLDisplay, EGLint*, EGLint*);
 typedef EGLBoolean (*PFN_eglChooseConfig)(EGLDisplay, const EGLint*, EGLConfig*, EGLint, EGLint*);
 typedef EGLContext (*PFN_eglCreateContext)(EGLDisplay, EGLConfig, EGLContext, const EGLint*);
 typedef EGLSurface (*PFN_eglCreateWindowSurface)(EGLDisplay, EGLConfig, EGLNativeWindowType, const EGLint*);
+typedef EGLSurface (*PFN_eglCreatePbufferSurface)(EGLDisplay, EGLConfig, const EGLint*);
 typedef EGLBoolean (*PFN_eglMakeCurrent)(EGLDisplay, EGLSurface, EGLSurface, EGLContext);
 typedef EGLBoolean (*PFN_eglSwapBuffers)(EGLDisplay, EGLSurface);
 typedef EGLBoolean (*PFN_eglBindAPI)(EGLenum);
@@ -73,6 +74,7 @@ static PFN_eglInitialize              p_eglInitialize;
 static PFN_eglChooseConfig            p_eglChooseConfig;
 static PFN_eglCreateContext           p_eglCreateContext;
 static PFN_eglCreateWindowSurface     p_eglCreateWindowSurface;
+static PFN_eglCreatePbufferSurface    p_eglCreatePbufferSurface;
 static PFN_eglMakeCurrent             p_eglMakeCurrent;
 static PFN_eglSwapBuffers             p_eglSwapBuffers;
 static PFN_eglBindAPI                 p_eglBindAPI;
@@ -112,6 +114,9 @@ static int load_egl(void) {
   LOAD(eglGetDisplay); LOAD(eglInitialize); LOAD(eglChooseConfig);
   LOAD(eglCreateContext); LOAD(eglCreateWindowSurface); LOAD(eglMakeCurrent);
   LOAD(eglSwapBuffers); LOAD(eglBindAPI); LOAD(eglQueryString); LOAD(eglGetError);
+  p_eglCreatePbufferSurface = (PFN_eglCreatePbufferSurface)dlsym(h, "eglCreatePbufferSurface");
+  if (!p_eglCreatePbufferSurface)
+    fprintf(stderr, "bridge_gl: eglCreatePbufferSurface ausente (ok se nao usar ULTRAKILL_NO_SDL_GL)\n");
 #undef LOAD
   return 0;
 }
@@ -150,10 +155,17 @@ shim_gl_status shim_gl_init(shim_gl_ctx *out, int w, int h, const char *title) {
   SDL_GL_SetAttribute(SDL_GL_DEPTH_SIZE, 24);
   SDL_GL_SetAttribute(SDL_GL_STENCIL_SIZE, 8);
 
+  /* ULTRAKILL_NO_SDL_GL: firmware com GL quebrado (R36S/ArkOS4Clone: SDL
+   * 2.32 + mesa por cima do nosso glvnd crasha no loader GBM/DRM). Nesse
+   * modo NAO pedimos GL ao SDL (sem SDL_WINDOW_OPENGL - senao o crash e la
+   * dentro); o EGL e criado 100% por nos com Pbuffer + o shim entrega essa
+   * surface ao Unity quando ele chama eglCreateWindowSurface. */
+  static int no_sdl_gl = getenv("ULTRAKILL_NO_SDL_GL") != NULL;
+
   SDL_Window *win = SDL_CreateWindow(title ? title : "ULTRAKILL",
                                      SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED,
                                      w, h,
-                                     SDL_WINDOW_OPENGL | SDL_WINDOW_FULLSCREEN | SDL_WINDOW_ALLOW_HIGHDPI);
+                                     (no_sdl_gl ? 0 : SDL_WINDOW_OPENGL) | SDL_WINDOW_FULLSCREEN | SDL_WINDOW_ALLOW_HIGHDPI);
   if (!win) {
     fprintf(stderr, "SDL_CreateWindow: %s (tente SDL_VIDEODRIVER=x11 / kmsgrab)\n", SDL_GetError());
     return SHIM_GL_NO_WINDOW;
@@ -194,7 +206,7 @@ shim_gl_status shim_gl_init(shim_gl_ctx *out, int w, int h, const char *title) {
   p_eglBindAPI(EGL_OPENGL_ES_API);
 
   const EGLint cfgAttr[] = {
-    EGL_SURFACE_TYPE, EGL_WINDOW_BIT,
+    EGL_SURFACE_TYPE, no_sdl_gl ? EGL_PBUFFER_BIT : EGL_WINDOW_BIT,
     EGL_RENDERABLE_TYPE, EGL_OPENGL_ES3_BIT,
     EGL_RED_SIZE, 8, EGL_GREEN_SIZE, 8, EGL_BLUE_SIZE, 8, EGL_ALPHA_SIZE, 8,
     EGL_DEPTH_SIZE, 24, EGL_STENCIL_SIZE, 8,
@@ -217,9 +229,16 @@ shim_gl_status shim_gl_init(shim_gl_ctx *out, int w, int h, const char *title) {
   }
   if (!out->egl_context) return SHIM_GL_CTX_FAIL;
 
-  out->egl_surface = p_eglCreateWindowSurface(out->egl_display, cfg, out->native_window, NULL);
-  if (!out->egl_surface) {
-    fprintf(stderr, "eglCreateWindowSurface falhou (err=0x%x)\n", p_eglGetError());
+  if (no_sdl_gl) {
+    const EGLint pbuf[] = { EGL_WIDTH, w, EGL_HEIGHT, h, EGL_NONE };
+    fprintf(stderr, "bridge_gl: modo NO_SDL_GL - criando Pbuffer %dx%d\n", w, h);
+    out->egl_surface = p_eglCreatePbufferSurface
+        ? p_eglCreatePbufferSurface(out->egl_display, cfg, pbuf) : EGL_NO_SURFACE;
+  } else {
+    out->egl_surface = p_eglCreateWindowSurface(out->egl_display, cfg, out->native_window, NULL);
+  }
+  if (!out->egl_surface || out->egl_surface == EGL_NO_SURFACE) {
+    fprintf(stderr, "eglCreateWindowSurface/Pbuffer falhou (err=0x%x)\n", p_eglGetError());
     return SHIM_GL_CTX_FAIL;
   }
   if (!p_eglMakeCurrent(out->egl_display, out->egl_surface, out->egl_surface, out->egl_context)) {
