@@ -4789,6 +4789,11 @@ static BenderEGLBoolean bender_eglBindAPI(BenderEGLenum api){
     if(g_bender_sdl_ready){logmsg("[BENDER_EGL][BIND_API][SDL] api=0x%x\n",api);return api==BENDER_EGL_OPENGL_ES_API?BENDER_EGL_TRUE:bender_egl_fail(BENDER_EGL_BAD_PARAMETER);}
     typedef BenderEGLBoolean(*Fn)(BenderEGLenum);Fn f=(Fn)bender_host_egl_sym("eglBindAPI");return f?f(api):BENDER_EGL_FALSE;
 }
+/* ULTRAKILL: estado do fallback pbuffer ( EGL surfaceless so ) */
+static BenderEGLConfig  g_bender_pb_cfg;
+static BenderEGLSurface g_bender_pb_surface;
+static int              g_bender_pb_cfg_ok;
+
 static int bender_sdl_gl_attr(int attr,int fallback);
 static BenderEGLBoolean bender_eglChooseConfig(BenderEGLDisplay d,const BenderEGLint *attrs,BenderEGLConfig *configs,BenderEGLint config_size,BenderEGLint *num){
     if(d==BENDER_EGL_DISPLAY_COOKIE&&g_bender_sdl_ready){
@@ -4822,7 +4827,36 @@ static BenderEGLBoolean bender_eglChooseConfig(BenderEGLDisplay d,const BenderEG
         logmsg("[BENDER_EGL][CHOOSE_CONFIG][SDL] call=%lu rc=1 num=%d req_render=0x%x available=0x%x req_surface=0x%x config=%p\n",g_bender_egl_choose_calls,compatible?1:0,req_render,g_bender_egl_renderable_bits,req_surface,compatible?BENDER_EGL_CONFIG_COOKIE:NULL);
         return BENDER_EGL_TRUE;
     }
-    typedef BenderEGLBoolean(*Fn)(BenderEGLDisplay,const BenderEGLint*,BenderEGLConfig*,BenderEGLint,BenderEGLint*);Fn f=(Fn)bender_host_egl_sym("eglChooseConfig");BenderEGLBoolean rc=f?f(d,attrs,configs,config_size,num):0;logmsg("[BENDER_EGL][CHOOSE_CONFIG][RAW] rc=%u num=%d err=0x%x\n",rc,num?*num:-1,(unsigned)bender_host_egl_error());return rc;
+    typedef BenderEGLBoolean(*Fn)(BenderEGLDisplay,const BenderEGLint*,BenderEGLConfig*,BenderEGLint,BenderEGLint*);Fn f=(Fn)bender_host_egl_sym("eglChooseConfig");
+    if(!f)return 0;
+    /* ULTRAKILL/R36S: aqui o host EGL e SURFACELESS (Mesa llvmpipe por cima
+     * do glvndstack do port) - o GBM dessa firmware esta morto, tanto que o
+     * SDL deles mesmo falha com "Can't window GBM/EGL surfaces". Config com
+     * EGL_WINDOW_BIT = ZERO -> o Unity recebe num=0, nao tem GFX device e chama
+     * UnityPlayer.kill() no primeiro nativeRender (visto no log do device).
+     * Re-consulta forcando EGL_PBUFFER_BIT: pbuffer e render target completo. */
+    BenderEGLBoolean rc=f(d,attrs,configs,config_size,num);
+    int raw_num=(rc&&num)?*num:0;
+    logmsg("[BENDER_EGL][CHOOSE_CONFIG][RAW] rc=%u num=%d err=0x%x\n",rc,raw_num,(unsigned)bender_host_egl_error());
+    if(rc&&raw_num==0){
+        BenderEGLint pb[80];int n=0,i,havest=0;
+        if(attrs){for(i=0;i<64&&n<72;i+=2){BenderEGLint a=attrs[i];if(a==BENDER_EGL_NONE)break;BenderEGLint v=attrs[i+1];
+                    if(a==BENDER_EGL_SURFACE_TYPE){v=(v&~BENDER_EGL_WINDOW_BIT)|BENDER_EGL_PBUFFER_BIT;if(!v)v=BENDER_EGL_PBUFFER_BIT;havest=1;}
+                    pb[n++]=a;pb[n++]=v;}}
+        if(!havest){pb[n++]=BENDER_EGL_SURFACE_TYPE;pb[n++]=BENDER_EGL_PBUFFER_BIT;}
+        pb[n++]=BENDER_EGL_NONE;
+        BenderEGLint n2=0;
+        BenderEGLBoolean rc2=f(d,pb,configs,config_size,&n2);
+        logmsg("[BENDER_EGL][CHOOSE_CONFIG][RAW_PBUFFER] rc=%u num=%d err=0x%x\n",rc2,n2,(unsigned)bender_host_egl_error());
+        if(rc2&&n2>0){
+            g_bender_pb_cfg=(configs&&config_size>0)?configs[0]:0;
+            if(!g_bender_pb_cfg)g_bender_pb_cfg=(BenderEGLConfig)(uintptr_t)1;
+            g_bender_pb_cfg_ok=1;
+            if(num)*num=n2;
+            return BENDER_EGL_TRUE;
+        }
+    }
+    return rc;
 }
 static int bender_sdl_gl_attr(int attr,int fallback){int v=fallback;if(g_sdl_GL_GetAttribute&&g_sdl_GL_GetAttribute(attr,&v)==0)return v;return fallback;}
 static BenderEGLBoolean bender_eglGetConfigAttrib(BenderEGLDisplay d,BenderEGLConfig c,BenderEGLint attr,BenderEGLint *value){
@@ -4862,6 +4896,26 @@ static BenderEGLBoolean bender_eglGetConfigAttrib(BenderEGLDisplay d,BenderEGLCo
 static BenderEGLSurface bender_eglCreateWindowSurface(BenderEGLDisplay d,BenderEGLConfig c,BenderEGLNativeWindowType win,const BenderEGLint *attrs){
     (void)win;(void)attrs;bender_gpu_stage("eglCreateWindowSurface");
     if(d==BENDER_EGL_DISPLAY_COOKIE&&c==BENDER_EGL_CONFIG_COOKIE&&g_bender_sdl_ready){logmsg("[BENDER_EGL][WINDOW_TO_SDL] android_window=%p -> surface=%p drawable=%dx%d\n",win,BENDER_EGL_SURFACE_COOKIE,g_bender_sdl_draw_w,g_bender_sdl_draw_h);return BENDER_EGL_SURFACE_COOKIE;}
+    /* ULTRAKILL/R36S: sem GBM nao ha window surface possivel. Quando o
+     * choose_config acima achou um config pbuffer, devolve um PBUFFER real do
+     * tamanho que o guest pede no ANativeWindow - e o que o bridge deste port
+     * faz e o que o Mesa daqui aceita (egltest: ES 3.2 swrast). */
+    if(g_bender_pb_cfg_ok){
+        typedef BenderEGLSurface(*Fnp)(BenderEGLDisplay,BenderEGLConfig,const BenderEGLint*);
+        Fnp fp=(Fnp)bender_host_egl_sym("eglCreatePbufferSurface");
+        if(fp){
+            int W=g_native_window.width>0?g_native_window.width:640;
+            int H=g_native_window.height>0?g_native_window.height:480;
+            const BenderEGLint at[]={BENDER_EGL_WIDTH,W,BENDER_EGL_HEIGHT,H,BENDER_EGL_NONE};
+            BenderEGLConfig use=c?c:g_bender_pb_cfg;
+            BenderEGLSurface s=fp(d,use,at);
+            logmsg("[BENDER_EGL][WINDOW_AS_PBUFFER] window surface indisponivel (GBM morto) -> pbuffer %dx%d cfg=%p surface=%p\n",
+                   W,H,(void*)use,(void*)s);
+            if(s){g_bender_pb_surface=s;bender_gpu_watchdog_done("eglCreateWindowSurface-as-pbuffer");return s;}
+            g_bender_egl_error=bender_host_egl_error();
+            logmsg("[BENDER_EGL][WINDOW_AS_PBUFFER][FAIL] err=0x%x; cai no caminho original\n",(unsigned)g_bender_egl_error);
+        }
+    }
     typedef BenderEGLSurface(*Fn)(BenderEGLDisplay,BenderEGLConfig,BenderEGLNativeWindowType,const BenderEGLint*);Fn f=(Fn)bender_host_egl_sym("eglCreateWindowSurface");return f?f(d,c,win,attrs):NULL;
 }
 static BenderEGLSurface bender_eglCreatePbufferSurface(BenderEGLDisplay d,BenderEGLConfig c,const BenderEGLint *attrs){
@@ -5625,9 +5679,154 @@ static BenderEGLBoolean bender_eglQuerySurface(BenderEGLDisplay d,BenderEGLSurfa
     typedef BenderEGLBoolean(*Fn)(BenderEGLDisplay,BenderEGLSurface,BenderEGLint,BenderEGLint*);Fn f=(Fn)bender_host_egl_sym("eglQuerySurface");return f?f(d,s,attr,value):0;
 }
 static BenderEGLBoolean bender_eglSurfaceAttrib(BenderEGLDisplay d,BenderEGLSurface s,BenderEGLint attr,BenderEGLint value){if(d==BENDER_EGL_DISPLAY_COOKIE&&s==BENDER_EGL_SURFACE_COOKIE){logmsg("[BENDER_EGL][SURFACE_ATTRIB][SDL] attr=0x%x value=%d ignored=1\n",attr,value);return BENDER_EGL_TRUE;}typedef BenderEGLBoolean(*Fn)(BenderEGLDisplay,BenderEGLSurface,BenderEGLint,BenderEGLint);Fn f=(Fn)bender_host_egl_sym("eglSurfaceAttrib");return f?f(d,s,attr,value):0;}
+
+/* ================= ULTRAKILL: present KMS dumb buffer (caminho RAW) =========
+ * O host EGL aqui e surfaceless e a window surface nao existe (GBM morto),
+ * entao o quadro nasce num pbuffer e precisa ser copiado para o scanout na
+ * mao. card0 e escrevivel no ArkOS4Clone da R36S (ark esta no grupo video),
+ * e exatamente o caminho que o bridge_gl.c deste port usou:
+ *   CREATE_DUMB -> MAP_DUMB -> mmap -> AddFB -> SetCrtc, e por frame:
+ *   glReadPixels(pbuffer) -> blit nearest para o fb. */
+#include <xf86drm.h>
+#include <xf86drmMode.h>
+#include <drm.h>
+#include <sys/ioctl.h>
+#include <sys/mman.h>
+#include <fcntl.h>
+#include <errno.h>
+#include <string.h>
+#include <stdint.h>
+#include <stdlib.h>
+#include <unistd.h>
+
+typedef void (*UkReadPixelsFn)(int, int, int, int, unsigned, unsigned, void *);
+static int              g_uk_fd = -1;
+static void            *g_uk_map;
+static unsigned         g_uk_pitch, g_uk_w, g_uk_h, g_uk_fb, g_uk_crtc, g_uk_conn;
+static unsigned char   *g_uk_buf;
+static UkReadPixelsFn  g_uk_read;
+static unsigned long    g_uk_kms_swaps;
+static int              g_uk_kms_off;
+
+static void uk_kms_log(const char *s) { logmsg("[BENDER_UK_KMS] %s\n", s); }
+
+static int uk_kms_init(int src_w, int src_h) {
+    const char *dev = getenv("ULTRAKILL_KMS");
+    if (!dev || !*dev) dev = "/dev/dri/card0";
+    g_uk_fd = open(dev, O_RDWR | O_CLOEXEC);
+    if (g_uk_fd < 0) { logmsg("[BENDER_UK_KMS] open %s falhou: %s\n", dev, strerror(errno)); return -1; }
+    drmModeRes *res = drmModeGetResources(g_uk_fd);
+    if (!res) { uk_kms_log("GetResources falhou"); return -1; }
+    drmModeConnector *conn = NULL;
+    for (int i = 0; i < res->count_connectors && !conn; i++) {
+        drmModeConnector *c = drmModeGetConnector(g_uk_fd, res->connectors[i]);
+        if (c && c->connection == DRM_MODE_CONNECTED && c->count_modes > 0) conn = c;
+        else if (c) drmModeFreeConnector(c);
+    }
+    if (!conn) { uk_kms_log("nenhum conector"); return -1; }
+    g_uk_crtc = res->crtcs[0];
+    drmModeEncoder *enc = drmModeGetEncoder(g_uk_fd, conn->encoder_id);
+    if (enc) { if (enc->crtc_id) g_uk_crtc = enc->crtc_id; drmModeFreeEncoder(enc); }
+    int mi = 0;
+    for (int i = 0; i < conn->count_modes; i++)
+        if (conn->modes[i].type & DRM_MODE_TYPE_PREFERRED) { mi = i; break; }
+    drmModeModeInfo *mode = &conn->modes[mi];
+    g_uk_w = mode->hdisplay; g_uk_h = mode->vdisplay; g_uk_conn = conn->connector_id;
+    struct drm_mode_create_dumb cd;
+    memset(&cd, 0, sizeof cd);
+    cd.width = g_uk_w; cd.height = g_uk_h; cd.bpp = 32;
+    if (ioctl(g_uk_fd, DRM_IOCTL_MODE_CREATE_DUMB, &cd)) {
+        logmsg("[BENDER_UK_KMS] CREATE_DUMB falhou: %s\n", strerror(errno)); return -1;
+    }
+    g_uk_pitch = cd.pitch;
+    struct drm_mode_map_dumb md;
+    memset(&md, 0, sizeof md);
+    md.handle = cd.handle;
+    if (ioctl(g_uk_fd, DRM_IOCTL_MODE_MAP_DUMB, &md)) {
+        logmsg("[BENDER_UK_KMS] MAP_DUMB falhou: %s\n", strerror(errno)); return -1;
+    }
+    g_uk_map = mmap(0, cd.size, PROT_READ | PROT_WRITE, MAP_SHARED, g_uk_fd, md.offset);
+    if (g_uk_map == MAP_FAILED) { uk_kms_log("mmap falhou"); return -1; }
+    if (drmModeAddFB(g_uk_fd, g_uk_w, g_uk_h, 24, 32, g_uk_pitch, cd.handle, &g_uk_fb)) {
+        uk_kms_log("AddFB falhou"); return -1;
+    }
+    if (drmModeSetCrtc(g_uk_fd, g_uk_crtc, g_uk_fb, 0, 0, &g_uk_conn, 1, mode)) {
+        uk_kms_log("SetCrtc falhou"); return -1;
+    }
+    g_uk_buf = (unsigned char *)malloc((size_t)src_w * (size_t)src_h * 4u);
+    if (!g_uk_buf) { uk_kms_log("sem buffer de readback"); return -1; }
+    logmsg("[BENDER_UK_KMS] scanout %ux%u assumido em %s (source %dx%d pitch=%u)\n",
+           g_uk_w, g_uk_h, dev, src_w, src_h, g_uk_pitch);
+    return 0;
+}
+
+static void *uk_gl_addr(const char *name) {
+    static void *gles;
+    void *p;
+    if (g_uk_read) return (void *)g_uk_read;
+    p = dlsym(RTLD_DEFAULT, name);
+    if (p) return p;
+    if (!gles) {
+        const char *gv = getenv("ULTRAKILL_REAL_LIBGLESV2");
+        gles = dlopen((gv && *gv) ? gv : "libGLESv2.so.2", RTLD_NOW | RTLD_NOLOAD);
+        if (!gles) gles = dlopen((gv && *gv) ? gv : "libGLESv2.so.2", RTLD_NOW);
+    }
+    if (gles) p = dlsym(gles, name);
+    return p;
+}
+
+static void uk_kms_present(int w, int h) {
+    unsigned char *base;
+    int x, y;
+    if (g_uk_kms_off || !g_uk_buf || !g_uk_map || w <= 0 || h <= 0) return;
+    if (!g_uk_read) {
+        g_uk_read = (UkReadPixelsFn)uk_gl_addr("glReadPixels");
+        if (!g_uk_read) { g_uk_kms_off = 1; uk_kms_log("glReadPixels ausente; present desligado"); return; }
+    }
+    g_uk_read(0, 0, w, h, 0x1908 /*GL_RGBA*/, 0x1401 /*GL_UNSIGNED_BYTE*/, g_uk_buf);
+    base = (unsigned char *)g_uk_map;
+    for (y = 0; y < (int)g_uk_h; y++) {
+        int sy = (int)((long long)y * h / (long long)g_uk_h);
+        unsigned char *drow;
+        const unsigned char *srow;
+        if (sy >= h) sy = h - 1;
+        srow = g_uk_buf + (size_t)sy * (size_t)w * 4u;
+        drow = base + (size_t)y * g_uk_pitch;
+        for (x = 0; x < (int)g_uk_w; x++) {
+            int sx = (int)((long long)x * w / (long long)g_uk_w);
+            const unsigned char *p;
+            if (sx >= w) sx = w - 1;
+            p = srow + (size_t)sx * 4u;
+            drow[x * 4 + 0] = p[2];   /* GL RGBA -> XRGB8888 */
+            drow[x * 4 + 1] = p[1];
+            drow[x * 4 + 2] = p[0];
+            drow[x * 4 + 3] = 0xff;
+        }
+    }
+    g_uk_kms_swaps++;
+    if (g_uk_kms_swaps <= 3u || g_uk_kms_swaps % 120u == 0u)
+        logmsg("[BENDER_UK_KMS] frame=%lu readback=%dx%d -> %ux%u\n",
+               g_uk_kms_swaps, w, h, g_uk_w, g_uk_h);
+}
+
 static BenderEGLBoolean bender_eglSwapBuffers(BenderEGLDisplay d,BenderEGLSurface s){
     if(d==BENDER_EGL_DISPLAY_COOKIE&&s==BENDER_EGL_SURFACE_COOKIE&&g_bender_sdl_ready){unsigned long next_swap=g_bender_egl_swaps+1ul;bender_render_inspector_before_swap(next_swap);bender_render_scale_present_2768();bender_input_draw_cursor();bender_gpu_watchdog_done("eglSwapBuffers-sdl");g_sdl_GL_SwapWindow(g_bender_sdl_window);++g_bender_egl_swaps;bender_render_scale_resume_2768();if(g_bender_egl_swaps<=10||g_bender_egl_swaps%60u==0u)logmsg("[BENDER_EGL][SWAP][SDL] frame=%lu drawable=%dx%d render_scale=%s\n",g_bender_egl_swaps,g_bender_sdl_draw_w,g_bender_sdl_draw_h,g_bender_rs_active_2768?"75%":"OFF");return BENDER_EGL_TRUE;}
-    typedef BenderEGLBoolean(*Fn)(BenderEGLDisplay,BenderEGLSurface);Fn f=(Fn)bender_host_egl_sym("eglSwapBuffers");return f?f(d,s):0;
+    typedef BenderEGLBoolean(*Fn)(BenderEGLDisplay,BenderEGLSurface);Fn f=(Fn)bender_host_egl_sym("eglSwapBuffers");
+    {
+        /* ULTRAKILL: sem SDL nao ha quem leve o quadro a tela; blitamos
+         * nos no dumb buffer. BENDER_UK_KMS=0 desliga sem recompilar. */
+        BenderEGLBoolean rrc=f?f(d,s):0;
+        if(rrc&&!g_bender_sdl_ready){
+            const char *off=getenv("BENDER_UK_KMS");
+            if(!(off&&!strcmp(off,"0"))){
+                int W=g_native_window.width>0?g_native_window.width:640;
+                int H=g_native_window.height>0?g_native_window.height:480;
+                if(g_uk_fd<0&&!g_uk_kms_off)if(uk_kms_init(W,H)<0)g_uk_kms_off=1;
+                if(!g_uk_kms_off)uk_kms_present(W,H);
+            }
+        }
+        return rrc;
+    }
 }
 static BenderEGLBoolean bender_eglSwapInterval(BenderEGLDisplay d,BenderEGLint interval){
     if(d==BENDER_EGL_DISPLAY_COOKIE&&g_bender_sdl_ready){int rc=g_sdl_GL_SetSwapInterval?g_sdl_GL_SetSwapInterval(interval):0;logmsg("[BENDER_EGL][SWAP_INTERVAL][SDL] interval=%d rc=%d error=%s\n",interval,rc,bender_sdl_error());return rc==0?BENDER_EGL_TRUE:BENDER_EGL_FALSE;}

@@ -67,7 +67,7 @@ jobs:
             # ============================================================
             cd /src/ultrakill_port
             mkdir -p bender/out audio_bridge
-            gcc -O2 -fPIE -pie -w bender/unity_probe.c -o bender/out/unity_probe.aarch64 -ldl -pthread
+            gcc -O2 -fPIE -pie -w -I/usr/include/libdrm bender/unity_probe.c -o bender/out/unity_probe.aarch64 -ldl -pthread -ldrm
             gcc -O2 -fPIC -shared -w bender/bender_opensles.c -o audio_bridge/libOpenSLES.so -ldl -pthread
             # SEM grep/readelf aqui: o bloco YAML e single-quoted e comeria as
             # aspas do padrao (foi o que deu exit 127 no run #101).
