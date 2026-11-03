@@ -1771,6 +1771,18 @@ static int bender_jni_class_is_a(const char*child,const char*parent){
     if(!strcmp(child,"java/lang/Class")&&(!strcmp(parent,"java/io/Serializable")||!strcmp(parent,"java/lang/reflect/AnnotatedElement")||!strcmp(parent,"java/lang/reflect/Type")))return 1;
     if(!strcmp(child,"javax/net/ssl/X509TrustManager")&&!strcmp(parent,"javax/net/ssl/TrustManager"))return 1;
     if(!strcmp(child,"java/security/cert/X509Certificate")&&!strcmp(parent,"java/security/cert/Certificate"))return 1;
+    /* ULTRAKILL(Unity 2019.4): o UnityPlayer pergunta se o Context que recebeu
+     * e uma android/app/Activity; se nao for, ele chama UnityPlayer.kill() no
+     * primeiro nativeRender e o port volta para a gamelist sem nenhum erro
+     * (exception=0 fatal=0). Nossa JVM sintetica entrega o contexto como
+     * android/content/Context, entao mapeamos a cadeia Activity/Context aqui. */
+    if(strstr(child,"Activity")&&(!strcmp(parent,"android/app/Activity")||!strcmp(parent,"android/content/Context")
+        ||!strcmp(parent,"android/app/Application")||!strcmp(parent,"android/content/ContextWrapper")
+        ||!strcmp(parent,"android/os/Service")||!strcmp(parent,"android/app/Service")))return 1;
+    if((strstr(child,"Context")||strstr(child,"Activity")||strstr(child,"Application"))&&
+        (!strcmp(parent,"android/content/Context")||!strcmp(parent,"android/content/ContextWrapper")))return 1;
+    if(!strcmp(child,"android/app/Activity")&&(!strcmp(parent,"android/content/Context")||!strcmp(parent,"android/content/ContextWrapper")
+        ||!strcmp(parent,"android/app/Application")))return 1;
     return 0;
 }
 static bjboolean jni_IsInstanceOf(BEnv*env,void*obj,void*clazz){
@@ -10753,7 +10765,8 @@ logmsg("[BENDER_FN_FALLBACK][ARMED] version=2.7.173 modifier=FN|L1+R1 native_fn_
                                     if(!g_unity_init_jni_fn){
                                         logmsg("[UNITY_PROBE][INITJNI][ERROR] UnityPlayer.initJni nao foi registrado.\n");
                                     } else {
-                                        BObj *ctx=new_obj(4,"android/content/Context",BENDER_APP_PACKAGE);
+                                        BObj *ctx=new_obj(4,"android/app/Activity",BENDER_APP_PACKAGE);
+                        logmsg("[BENDER_JNI][CTX] contexto sintatico entregue como android/app/Activity (Unity 2019.4 exige instanceof Activity)\n");
                                         BObj *activity=new_obj(4,"com/unity3d/player/UnityPlayerForActivityOrService","instance");
                                         g_unity_activity_instance=activity;
                                         logmsg("[BENDER_JNI][CURRENT_ACTIVITY][BIND] activity=%p class=%s\n",(void*)activity,activity?activity->a:"?");
