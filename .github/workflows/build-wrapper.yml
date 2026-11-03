@@ -81,7 +81,8 @@ jobs:
         # glvnd + libEGL_mesa + swrast(llvmpipe) + gbm + deps. Lento mas
         # real e INDEPENDENTE do kernel/driver da firmware.
         run: |
-          docker run --rm -v "$PWD:/src" -w /tmp public.ecr.aws/debian/debian:bullseye-slim bash -ec '
+          # reusa a imagem ja baixada pelo passo build (evita toomanyrequests)
+          docker run --rm -v "$PWD:/src" -w /tmp debian:bullseye-slim bash -ec '
             set -e
             sed -i "s|deb.debian.org|archive.debian.org|g;s|security.debian.org|archive.debian.org|g" /etc/apt/sources.list 2>/dev/null || true
             apt-get -o Acquire::Check-Valid-Until=false update

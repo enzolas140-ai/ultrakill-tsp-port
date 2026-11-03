@@ -1,0 +1,44 @@
+﻿build-arm64	gl stack software (glvnd+mesa llvmpipe) do bullseye	´╗┐2026-11-03T02:21:01.8316486Z ##[group]Run docker run --rm -v "$PWD:/src" -w /tmp public.ecr.aws/debian/debian:bullseye-slim bash -ec '
+build-arm64	gl stack software (glvnd+mesa llvmpipe) do bullseye	2026-11-03T02:21:01.8317347Z ^[[36;1mdocker run --rm -v "$PWD:/src" -w /tmp public.ecr.aws/debian/debian:bullseye-slim bash -ec '^[[0m
+build-arm64	gl stack software (glvnd+mesa llvmpipe) do bullseye	2026-11-03T02:21:01.8317762Z ^[[36;1m  set -e^[[0m
+build-arm64	gl stack software (glvnd+mesa llvmpipe) do bullseye	2026-11-03T02:21:01.8318252Z ^[[36;1m  sed -i "s|deb.debian.org|archive.debian.org|g;s|security.debian.org|archive.debian.org|g" /etc/apt/sources.list 2>/dev/null || true^[[0m
+build-arm64	gl stack software (glvnd+mesa llvmpipe) do bullseye	2026-11-03T02:21:01.8318867Z ^[[36;1m  apt-get -o Acquire::Check-Valid-Until=false update^[[0m
+build-arm64	gl stack software (glvnd+mesa llvmpipe) do bullseye	2026-11-03T02:21:01.8319212Z ^[[36;1m  mkdir -p /tmp/dls && cd /tmp/dls^[[0m
+build-arm64	gl stack software (glvnd+mesa llvmpipe) do bullseye	2026-11-03T02:21:01.8319847Z ^[[36;1m  apt-get download libegl1 libglvnd0 libegl-mesa0 libgles2 libglapi-mesa libgbm1 libdrm2 libexpat1 liblz4-1 libzstd1 libllvm11 libgl1-mesa-dri || true^[[0m
+build-arm64	gl stack software (glvnd+mesa llvmpipe) do bullseye	2026-11-03T02:21:01.8320472Z ^[[36;1m  ls *.deb | wc -l^[[0m
+build-arm64	gl stack software (glvnd+mesa llvmpipe) do bullseye	2026-11-03T02:21:01.8320678Z ^[[36;1m  mkdir -p x && cd x^[[0m
+build-arm64	gl stack software (glvnd+mesa llvmpipe) do bullseye	2026-11-03T02:21:01.8320945Z ^[[36;1m  for d in /tmp/dls/*.deb; do dpkg-deb -x "$d" .; done^[[0m
+build-arm64	gl stack software (glvnd+mesa llvmpipe) do bullseye	2026-11-03T02:21:01.8321340Z ^[[36;1m  S=/src/ultrakill_port/libs/arm64/glvndstack^[[0m
+build-arm64	gl stack software (glvnd+mesa llvmpipe) do bullseye	2026-11-03T02:21:01.8321623Z ^[[36;1m  mkdir -p $S/dri $S/glvnd^[[0m
+build-arm64	gl stack software (glvnd+mesa llvmpipe) do bullseye	2026-11-03T02:21:01.8321861Z ^[[36;1m  A=usr/lib/aarch64-linux-gnu^[[0m
+build-arm64	gl stack software (glvnd+mesa llvmpipe) do bullseye	2026-11-03T02:21:01.8322146Z ^[[36;1m  cp -Lv $A/libEGL.so.1* $S/ 2>/dev/null || true^[[0m
+build-arm64	gl stack software (glvnd+mesa llvmpipe) do bullseye	2026-11-03T02:21:01.8322816Z ^[[36;1m  cp -Lv $A/libEGL_mesa.so.0* $S/ 2>/dev/null || true^[[0m
+build-arm64	gl stack software (glvnd+mesa llvmpipe) do bullseye	2026-11-03T02:21:01.8323220Z ^[[36;1m  cp -Lv $A/libGLESv1_CM.so.1* $A/libGLESv2.so.2* $S/ 2>/dev/null || true^[[0m
+build-arm64	gl stack software (glvnd+mesa llvmpipe) do bullseye	2026-11-03T02:21:01.8323679Z ^[[36;1m  cp -Lv $A/libGLdispatch.so.0* $A/libGLX.so.0* $S/ 2>/dev/null || true^[[0m
+build-arm64	gl stack software (glvnd+mesa llvmpipe) do bullseye	2026-11-03T02:21:01.8324531Z ^[[36;1m  cp -Lv $A/libgbm.so.1* $A/libdrm.so.2* $A/libexpat.so.1* $S/ 2>/dev/null || true^[[0m
+build-arm64	gl stack software (glvnd+mesa llvmpipe) do bullseye	2026-11-03T02:21:01.8325035Z ^[[36;1m  cp -Lv $A/liblz4.so.1* $A/libzstd.so.1* $A/libglapi.so.0* $S/ 2>/dev/null || true^[[0m
+build-arm64	gl stack software (glvnd+mesa llvmpipe) do bullseye	2026-11-03T02:21:01.8325549Z ^[[36;1m  cp -Lv usr/lib/llvm-11/lib/libLLVM-11.so* $A/libLLVM-11.so* $S/ 2>/dev/null || true^[[0m
+build-arm64	gl stack software (glvnd+mesa llvmpipe) do bullseye	2026-11-03T02:21:01.8326068Z ^[[36;1m  cp -Lv $A/dri/swrast_dri.so $A/dri/kms_swrast_dri.so $S/dri/ 2>/dev/null || true^[[0m
+build-arm64	gl stack software (glvnd+mesa llvmpipe) do bullseye	2026-11-03T02:21:01.8326566Z ^[[36;1m  cp -v usr/share/glvnd/egl_vendor.d/50_mesa.json $S/glvnd/ 2>/dev/null || true^[[0m
+build-arm64	gl stack software (glvnd+mesa llvmpipe) do bullseye	2026-11-03T02:21:01.8327026Z ^[[36;1m  chmod -R a+rwX $S   # runner precisa reescrever o json depois^[[0m
+build-arm64	gl stack software (glvnd+mesa llvmpipe) do bullseye	2026-11-03T02:21:01.8327438Z ^[[36;1m  find $S -maxdepth 1 -name "*.so*" | grep -v glvndstack || true^[[0m
+build-arm64	gl stack software (glvnd+mesa llvmpipe) do bullseye	2026-11-03T02:21:01.8327762Z ^[[36;1m  du -sh $S^[[0m
+build-arm64	gl stack software (glvnd+mesa llvmpipe) do bullseye	2026-11-03T02:21:01.8327939Z ^[[36;1m'^[[0m
+build-arm64	gl stack software (glvnd+mesa llvmpipe) do bullseye	2026-11-03T02:21:01.8328108Z ^[[36;1mpython3 - <<'PYEOF'^[[0m
+build-arm64	gl stack software (glvnd+mesa llvmpipe) do bullseye	2026-11-03T02:21:01.8328321Z ^[[36;1mimport json, os^[[0m
+build-arm64	gl stack software (glvnd+mesa llvmpipe) do bullseye	2026-11-03T02:21:01.8328606Z ^[[36;1mp = "ultrakill_port/libs/arm64/glvndstack/glvnd/50_mesa.json"^[[0m
+build-arm64	gl stack software (glvnd+mesa llvmpipe) do bullseye	2026-11-03T02:21:01.8328967Z ^[[36;1mif os.path.exists(p):^[[0m
+build-arm64	gl stack software (glvnd+mesa llvmpipe) do bullseye	2026-11-03T02:21:01.8329190Z ^[[36;1m    d = json.load(open(p))^[[0m
+build-arm64	gl stack software (glvnd+mesa llvmpipe) do bullseye	2026-11-03T02:21:01.8329516Z ^[[36;1m    base = os.path.abspath("ultrakill_port/libs/arm64/glvndstack")^[[0m
+build-arm64	gl stack software (glvnd+mesa llvmpipe) do bullseye	2026-11-03T02:21:01.8329955Z ^[[36;1m    d["ICD"]["library_path"] = os.path.join(base, d["ICD"]["library_path"])^[[0m
+build-arm64	gl stack software (glvnd+mesa llvmpipe) do bullseye	2026-11-03T02:21:01.8330341Z ^[[36;1m    json.dump(d, open(p, "w"), indent=2)^[[0m
+build-arm64	gl stack software (glvnd+mesa llvmpipe) do bullseye	2026-11-03T02:21:01.8330660Z ^[[36;1m    print("vendor json ->", d["ICD"]["library_path"])^[[0m
+build-arm64	gl stack software (glvnd+mesa llvmpipe) do bullseye	2026-11-03T02:21:01.8330944Z ^[[36;1mPYEOF^[[0m
+build-arm64	gl stack software (glvnd+mesa llvmpipe) do bullseye	2026-11-03T02:21:01.8331158Z ^[[36;1mls -la ultrakill_port/libs/arm64/glvndstack/^[[0m
+build-arm64	gl stack software (glvnd+mesa llvmpipe) do bullseye	2026-11-03T02:21:01.8379797Z shell: /usr/bin/bash -e {0}
+build-arm64	gl stack software (glvnd+mesa llvmpipe) do bullseye	2026-11-03T02:21:01.8380057Z ##[endgroup]
+build-arm64	gl stack software (glvnd+mesa llvmpipe) do bullseye	2026-11-03T02:21:01.8576036Z Unable to find image 'public.ecr.aws/debian/debian:bullseye-slim' locally
+build-arm64	gl stack software (glvnd+mesa llvmpipe) do bullseye	2026-11-03T02:21:02.5348722Z docker: Error response from daemon: toomanyrequests: Rate exceeded
+build-arm64	gl stack software (glvnd+mesa llvmpipe) do bullseye	2026-11-03T02:21:02.5359254Z 
+build-arm64	gl stack software (glvnd+mesa llvmpipe) do bullseye	2026-11-03T02:21:02.5359591Z Run 'docker run --help' for more information
+build-arm64	gl stack software (glvnd+mesa llvmpipe) do bullseye	2026-11-03T02:21:02.5378651Z ##[error]Process completed with exit code 125.
