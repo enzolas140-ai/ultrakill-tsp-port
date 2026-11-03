@@ -244,11 +244,18 @@ int main(int argc, char **argv, char **envp) {
       void *ctx = (*env)->FindClass(env, "android/content/res/UnityPlayerActivity");
 
       if (fnInit)   { fprintf(stderr, "chamando initJni(ctx)\n");
-                      ((Fn_V_ctx)fnInit)(env, NULL, ctx); }
-      if (fnFocus)  { fprintf(stderr, "chamando nativeFocusChanged(1)\n");
-                      ((Fn_V_bool)fnFocus)(env, NULL, 1); }
+                      ((Fn_V_ctx)fnInit)(env, NULL, ctx);
+                      fprintf(stderr, "initJni voltou\n"); }
+      if (fnFocus && !getenv("ULTRAKILL_SKIP_FOCUS")) {
+                      fprintf(stderr, "chamando nativeFocusChanged(1)\n");
+                      ((Fn_V_bool)fnFocus)(env, NULL, 1);
+                      fprintf(stderr, "focus voltou\n");
+      } else if (fnFocus) {
+                      fprintf(stderr, "nativeFocusChanged PULADO (ULTRAKILL_SKIP_FOCUS)\n");
+      }
       if (fnResume) { fprintf(stderr, "chamando nativeResume()\n");
-                      ((Fn_V_noargs)fnResume)(env, NULL); }
+                      ((Fn_V_noargs)fnResume)(env, NULL);
+                      fprintf(stderr, "resume voltou\n"); }
 
       if (fnRender) {
         fprintf(stderr, ">> loop nativeRender comecando\n");
