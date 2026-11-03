@@ -72,11 +72,18 @@ jobs:
             ultrakill_port/gamedata/lib/arm64-v8a/libil2cpp.so \
             ultrakill_port/gamedata/lib/arm64-v8a/libmain.so \
             ultrakill_port/gamedata/lib/arm64-v8a/libstub.so 2>/dev/null || true
-          # Lab nao usa LD_PRELOAD. Para o libunity cair no NOSSO shim sem
-          # colidir SONAME com o Mesa, renomeamos o shim p/ libeglshm.so.
+          # Lab nao usa LD_PRELOAD. Tentamos renomear o shim p/ libeglshm.so
+          # (evita colidir SONAME com o Mesa do sistema); se o slot dynstr nao
+          # comportar, SEGUIMOS COM DT_NEEDED "libEGL.so" - que e exatamente o
+          # caminho do device, entao ate reproduz melhor o bug.
           cp ultrakill_port/libs/arm64/libEGL.so.1 ultrakill_port/libs/arm64/libeglshm.so
           python ultrakill_port/tools/rename_needed.py \
-            ultrakill_port/gamedata/lib/arm64-v8a/libunity.so libEGL.so libeglshm.so
+            ultrakill_port/gamedata/lib/arm64-v8a/libunity.so libEGL.so libeglshm.so \
+            || echo "AVISO: rename_needed nao coube; libunity continua pedindo libEGL.so (= mesmo que no cartao)"
+          ls -la ultrakill_port/libs/arm64/ | sed 's/^/  shim: /'
+          # o payload do lab NAO traz os bundles grandes (assets_all/scenes_all);
+          # se o crash precisa deles, o log vai dizer onde.
+          ls -la ultrakill_port/gamedata/aa/Android/ 2>/dev/null || echo "sem aa/Android no lab"
 
       - name: run bridge sob gdb (modo igual ao bisect do device)
         run: |
@@ -106,6 +113,7 @@ jobs:
           export HOME=/tmp/uk
           cd "$PD/gamedata/bin"
           ulimit -c unlimited || true
+          echo "== antes do gdb ==" ; ls -la
           timeout -s INT ${RUN_SECS} gdb -batch -nx \
             -ex "set pagination off" \
             -ex "set confirm off" \
