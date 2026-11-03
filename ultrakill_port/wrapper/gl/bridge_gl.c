@@ -195,8 +195,10 @@ static int kms_open(int src_w, int src_h) {
   uint32_t crtc = res->crtcs[0];
   drmModeEncoder *enc = drmModeGetEncoder(k->fd, conn->encoder_id);
   if (enc) { if (enc->crtc_id) crtc = enc->crtc_id; drmModeFreeEncoder(enc); }
-  drmModeModeInfo *mode = &conn->modes[conn->preferred_mode < conn->count_modes
-                                            ? conn->preferred_mode : 0];
+  int mi = 0;
+  for (int i = 0; i < conn->count_modes; i++)
+    if (conn->modes[i].type & DRM_MODE_TYPE_PREFERRED) { mi = i; break; }
+  drmModeModeInfo *mode = &conn->modes[mi];
   k->w = mode->hdisplay; k->h = mode->vdisplay; k->conn_id = conn->connector_id;
   struct drm_mode_create_dumb cd;
   memset(&cd, 0, sizeof cd);
