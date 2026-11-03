@@ -5716,11 +5716,13 @@ static BenderEGLBoolean bender_eglQuerySurface(BenderEGLDisplay d,BenderEGLSurfa
 }
 static BenderEGLBoolean bender_eglSurfaceAttrib(BenderEGLDisplay d,BenderEGLSurface s,BenderEGLint attr,BenderEGLint value){if(d==BENDER_EGL_DISPLAY_COOKIE&&s==BENDER_EGL_SURFACE_COOKIE){logmsg("[BENDER_EGL][SURFACE_ATTRIB][SDL] attr=0x%x value=%d ignored=1\n",attr,value);return BENDER_EGL_TRUE;}typedef BenderEGLBoolean(*Fn)(BenderEGLDisplay,BenderEGLSurface,BenderEGLint,BenderEGLint);Fn f=(Fn)bender_host_egl_sym("eglSurfaceAttrib");return f?f(d,s,attr,value):0;}
 
-/* ================= ULTRAKILL: present sem sequestrar o CRTC ================
- * licao da rodada anterior: assumir o CRTC (drmModeSetCrtc) e nao devolver
- * congela a UI do EmulationStation na tela de transicao do ArkOS. Ordem de
- * preferencia agora: /dev/fb0 (nao mexe em CRTC/FB alheio) -> KMS dumb buffer
- * com restauracao garantida. */
+/* ================= ULTRAKILL: present por /dev/fb0 (nunca toca no CRTC) ====
+ * Lição da rodada anterior: assumir o CRTC (drmModeSetCrtc) e não devolver
+ * congela a UI do EmulationStation na tela de transição do ArkOS. O fbdev é o
+ * mesmo painel, é escrevível pelo usuário "ark" neste firmware, e escrever nele
+ * não interfere nos FBs/modo do ES: quando o port sai, a ES repõe sozinha.
+ * Sem fb0 => roda headless (só log). KMS não é mais opção.
+ * BENDER_UK_PRESENT=off desliga o blit. */
 #include <linux/fb.h>
 #include <sys/ioctl.h>
 #include <sys/mman.h>
@@ -5730,36 +5732,18 @@ static BenderEGLBoolean bender_eglSurfaceAttrib(BenderEGLDisplay d,BenderEGLSurf
 #include <stdint.h>
 #include <stdlib.h>
 #include <unistd.h>
-#include <signal.h>
-#include <xf86drm.h>
-#include <xf86drmMode.h>
-#include <drm.h>
 
 typedef void (*UkReadPixelsFn)(int, int, int, int, unsigned, unsigned, void *);
 
-/* ---- backend fb0 ---- */
-static int       g_fb_fd = -1;
-static void     *g_fb_map;
-static size_t    g_fb_len;
-static unsigned  g_fb_w, g_fb_h, g_fb_pitch, g_fb_bpp;
-static unsigned  g_fb_ro, g_fb_go, g_fb_bo, g_fb_rl, g_fb_gl, g_fb_bl;
-
-/* ---- backend KMS (com devolucao) ---- */
-static int              g_uk_fd = -1;
-static void            *g_uk_map;
-static unsigned         g_uk_pitch, g_uk_w, g_uk_h, g_uk_fb, g_uk_crtc, g_uk_conn;
-static unsigned         g_uk_old_fb;
-static drmModeModeInfo  g_uk_old_mode;
-static int              g_uk_old_mode_ok;
-static struct drm_mode_set g_uk_undo;
-static unsigned         g_uk_undo_conn;
-static int              g_uk_kms_armed;
-
-static unsigned char   *g_uk_buf;
-static UkReadPixelsFn   g_uk_read;
-static unsigned long    g_uk_present_calls;
-static int              g_uk_off;          /* nenhum backend serviu */
-static int              g_uk_backend;      /* 1=fb0, 2=kms */
+static int      g_uk_fbfd = -1;
+static void    *g_uk_fbmap;
+static size_t   g_uk_fblen;
+static unsigned  g_uk_w, g_uk_h, g_uk_pitch, g_uk_bpp;
+static unsigned  g_uk_ro, g_uk_go, g_uk_bo, g_uk_rl, g_uk_gl, g_uk_bl;
+static unsigned char *g_uk_buf;
+static UkReadPixelsFn g_uk_read;
+static unsigned long  g_uk_present_calls;
+static int            g_uk_off;
 
 static void uk_log(const char *fmt, ...) {
     char line[512];
@@ -5788,218 +5772,53 @@ static void uk_test_pattern(unsigned char *base, unsigned w, unsigned h, unsigne
     }
 }
 
-/* ---------------- fb0 ---------------- */
 static int uk_fb_init(int src_w, int src_h) {
     struct fb_var_screeninfo var;
     struct fb_fix_screeninfo finfo;
     const char *dev = getenv("ULTRAKILL_FB_DEVICE");
+    size_t need;
     if (!dev || !*dev) dev = "/dev/fb0";
-    g_fb_fd = open(dev, O_RDWR | O_CLOEXEC);
-    if (g_fb_fd < 0) { uk_log("[BENDER_UK_PRESENT] fb0: open %s falhou: %s\n", dev, strerror(errno)); return -1; }
-    if (ioctl(g_fb_fd, FBIOGET_VSCREENINFO, &var) || ioctl(g_fb_fd, FBIOGET_FSCREENINFO, &finfo)) {
-        uk_log("[BENDER_UK_PRESENT] fb0: ioctl VS/FIS falhou: %s\n", strerror(errno)); return -1;
+    g_uk_fbfd = open(dev, O_RDWR | O_CLOEXEC);
+    if (g_uk_fbfd < 0) {
+        uk_log("[BENDER_UK_PRESENT] fb0: open %s falhou: %s\n", dev, strerror(errno));
+        return -1;
+    }
+    if (ioctl(g_uk_fbfd, FBIOGET_VSCREENINFO, &var) || ioctl(g_uk_fbfd, FBIOGET_FSCREENINFO, &finfo)) {
+        uk_log("[BENDER_UK_PRESENT] fb0: ioctl VS/FIS falhou: %s\n", strerror(errno));
+        return -1;
     }
     if (var.bits_per_pixel != 32 && var.bits_per_pixel != 16) {
         var.bits_per_pixel = 32; var.grayscale = 0;
         var.red.length = var.green.length = var.blue.length = 8;
         var.red.offset = 16; var.green.offset = 8; var.blue.offset = 0;
         var.transp.length = 0; var.transp.offset = 24;
-        if (ioctl(g_fb_fd, FBIOPUT_VSCREENINFO, &var) || ioctl(g_fb_fd, FBIOGET_VSCREENINFO, &var)) {
-            uk_log("[BENDER_UK_PRESENT] fb0: nao consegui 32bpp: %s\n", strerror(errno)); return -1;
+        if (ioctl(g_uk_fbfd, FBIOPUT_VSCREENINFO, &var) ||
+            ioctl(g_uk_fbfd, FBIOGET_VSCREENINFO, &var)) {
+            uk_log("[BENDER_UK_PRESENT] fb0: nao consegui 32bpp: %s\n", strerror(errno));
+            return -1;
         }
     }
-    g_fb_w = var.xres; g_fb_h = var.yres; g_fb_pitch = finfo.line_length; g_fb_bpp = var.bits_per_pixel;
-    g_fb_ro = var.red.offset; g_fb_go = var.green.offset; g_fb_bo = var.blue.offset;
-    g_fb_rl = var.red.length ? var.red.length : 8;
-    g_fb_gl = var.green.length ? var.green.length : 8;
-    g_fb_bl = var.blue.length ? var.blue.length : 8;
-    {
-        size_t need = (size_t)finfo.line_length * (var.yres_virtual ? var.yres_virtual : var.yres);
-        g_fb_len = finfo.smem_len && finfo.smem_len < need ? finfo.smem_len : need;
-    }
-    g_fb_map = mmap(0, g_fb_len, PROT_READ | PROT_WRITE, MAP_SHARED, g_fb_fd, 0);
-    if (g_fb_map == MAP_FAILED) { g_fb_map = NULL; uk_log("[BENDER_UK_PRESENT] fb0: mmap falhou\n"); return -1; }
-    uk_log("[BENDER_UK_PRESENT] backend=fb0 %ux%u bpp=%u pitch=%u (source %dx%d)\n",
-           g_fb_w, g_fb_h, g_fb_bpp, g_fb_pitch, src_w, src_h);
-    g_uk_buf = (unsigned char *)malloc((size_t)src_w * (size_t)src_h * 4u);
-    if (!g_uk_buf) { g_uk_buf = (unsigned char *)malloc(640u * 480u * 4u); if (!g_uk_buf) return -1; }
-    g_uk_backend = 1;
-    uk_test_pattern((unsigned char *)g_fb_map, g_fb_w, g_fb_h, g_fb_pitch);
-    uk_log("[BENDER_UK_PRESENT] padrao de teste pintado via fb0 (sem tocar no CRTC)\n");
-    return 0;
-}
-
-static void uk_fb_blit(const unsigned char *rgba, int sw, int sh) {
-    unsigned char *base = (unsigned char *)g_fb_map;
-    unsigned y, x;
-    for (y = 0; y < g_fb_h; y++) {
-        unsigned sy = (unsigned)((unsigned long long)y * (unsigned long long)sh / (g_fb_h ? g_fb_h : 1));
-        unsigned char *drow;
-        const unsigned char *srow;
-        if (sy >= (unsigned)sh) sy = sh - 1;
-        if ((size_t)y * g_fb_pitch + (size_t)g_fb_w * (g_fb_bpp / 8u) > g_fb_len) break;
-        srow = rgba + (size_t)sy * (size_t)sw * 4u;
-        drow = base + (size_t)y * g_fb_pitch;
-        for (x = 0; x < g_fb_w; x++) {
-            unsigned sx = (unsigned)((unsigned long long)x * (unsigned long long)sw / (g_fb_w ? g_fb_w : 1));
-            const unsigned char *p;
-            if (sx >= (unsigned)sw) sx = sw - 1;
-            p = srow + (size_t)sx * 4u;
-            if (g_fb_bpp == 32) {
-                uint32_t v = ((uint32_t)(p[0] >> (8 - g_fb_rl)) << g_fb_ro)
-                           | ((uint32_t)(p[1] >> (8 - g_fb_gl)) << g_fb_go)
-                           | ((uint32_t)(p[2] >> (8 - g_fb_bl)) << g_fb_bo)
-                           | (g_fb_rl + g_fb_gl + g_fb_bl < 32 ? (0xffu << (g_fb_rl + g_fb_gl + g_fb_bl)) : 0u);
-                ((uint32_t *)drow)[x] = v;
-            } else {
-                uint16_t v = (uint16_t)(((p[0] >> (8 - g_fb_rl)) << g_fb_ro)
-                       | ((p[1] >> (8 - g_fb_gl)) << g_fb_go)
-                       | ((p[2] >> (8 - g_fb_bl)) << g_fb_bo));
-                ((uint16_t *)drow)[x] = v;
-            }
-        }
-    }
-}
-
-/* ---------------- KMS (ultimo caso, com devolucao) ---------------- */
-static void uk_kms_undo_now(void) {
-    if (!g_uk_kms_armed || g_uk_fd < 0) return;
-    g_uk_kms_armed = 0;
-    if (g_uk_old_mode_ok && g_uk_old_fb) {
-        g_uk_undo.fd = g_uk_fd;
-        g_uk_undo.crtc_id = g_uk_crtc;
-        g_uk_undo.fb_id = g_uk_old_fb;
-        g_uk_undo.x = 0; g_uk_undo.y = 0;
-        g_uk_undo.count_connectors = 1;
-        g_uk_undo connectors_ptr = (uint64_t)(uintptr_t)&g_uk_undo_conn;
-        g_uk_undo.mode_ptr = (uint64_t)(uintptr_t)&g_uk_old_mode;
-        if (ioctl(g_uk_fd, DRM_IOCTL_MODE_SETCRTC, &g_uk_undo))
-            logmsg("[BENDER_UK_KMS] undo SetCrtc falhou: %s\n", strerror(errno));
-        else
-            logmsg("[BENDER_UK_KMS] CRTC devolvido ao ES (fb=%u %dpx)\n", g_uk_old_fb, g_uk_old_mode.hdisplay);
-    }
-}
-
-static void uk_kms_sighandler(int sig) {
-    uk_kms_undo_now();
-    signal(sig, SIG_DFL);
-    raise(sig);
-}
-
-static void uk_kms_atexit(void) { uk_kms_undo_now(); }
-
-static int uk_kms_init(int src_w, int src_h) {
-    const char *dev = getenv("ULTRAKILL_KMS");
-    drmModeRes *res;
-    drmModeConnector *conn = NULL;
-    drmModeCrtc *oldcrtc;
-    struct drm_mode_create_dumb cd;
-    struct drm_mode_map_dumb md;
-    if (!dev || !*dev) dev = "/dev/dri/card0";
-    g_uk_fd = open(dev, O_RDWR | O_CLOEXEC);
-    if (g_uk_fd < 0) { logmsg("[BENDER_UK_KMS] open %s falhou: %s\n", dev, strerror(errno)); return -1; }
-    res = drmModeGetResources(g_uk_fd);
-    if (!res) { logmsg("[BENDER_UK_KMS] GetResources falhou\n"); return -1; }
-    for (int i = 0; i < res->count_connectors && !conn; i++) {
-        drmModeConnector *c = drmModeGetConnector(g_uk_fd, res->connectors[i]);
-        if (c && c->connection == DRM_MODE_CONNECTED && c->count_modes > 0) conn = c;
-        else if (c) drmModeFreeConnector(c);
-    }
-    if (!conn) { logmsg("[BENDER_UK_KMS] nenhum conector\n"); return -1; }
-    g_uk_crtc = res->crtcs[0];
-    {
-        drmModeEncoder *enc = drmModeGetEncoder(g_uk_fd, conn->encoder_id);
-        if (enc) { if (enc->crtc_id) g_uk_crtc = enc->crtc_id; drmModeFreeEncoder(enc); }
-    }
-    {
-        int mi = 0;
-        for (int i = 0; i < conn->count_modes; i++)
-            if (conn->modes[i].type & DRM_MODE_TYPE_PREFERRED) { mi = i; break; }
-        g_uk_w = conn->modes[mi].hdisplay; g_uk_h = conn->modes[mi].vdisplay;
-    }
-    g_uk_conn = conn->connector_id;
-    /* ESTADO ANTERIOR: e o que vamos devolver na saida. */
-    oldcrtc = drmModeGetCrtc(g_uk_fd, g_uk_crtc);
-    if (oldcrtc) {
-        g_uk_old_fb = oldcrtc->fb_id;
-        if (oldcrtc->mode_valid) { g_uk_old_mode = oldcrtc->mode; g_uk_old_mode_ok = 1; }
-        drmModeFreeCrtc(oldcrtc);
-    }
-    drmModeFreeConnector(conn);
-    memset(&cd, 0, sizeof cd);
-    cd.width = g_uk_w; cd.height = g_uk_h; cd.bpp = 32;
-    if (ioctl(g_uk_fd, DRM_IOCTL_MODE_CREATE_DUMB, &cd)) {
-        logmsg("[BENDER_UK_KMS] CREATE_DUMB falhou: %s\n", strerror(errno)); return -1;
-    }
-    g_uk_pitch = cd.pitch;
-    memset(&md, 0, sizeof md);
-    md.handle = cd.handle;
-    if (ioctl(g_uk_fd, DRM_IOCTL_MODE_MAP_DUMB, &md)) {
-        logmsg("[BENDER_UK_KMS] MAP_DUMB falhou: %s\n", strerror(errno)); return -1;
-    }
-    g_uk_map = mmap(0, cd.size, PROT_READ | PROT_WRITE, MAP_SHARED, g_uk_fd, md.offset);
-    if (g_uk_map == MAP_FAILED) { logmsg("[BENDER_UK_KMS] mmap falhou\n"); return -1; }
-    if (drmModeAddFB(g_uk_fd, g_uk_w, g_uk_h, 24, 32, g_uk_pitch, cd.handle, &g_uk_fb)) {
-        logmsg("[BENDER_UK_KMS] AddFB falhou\n"); return -1;
-    }
-    {
-        drmModeModeInfo *mode = &g_uk_old_mode;
-        if (!g_uk_old_mode_ok) {
-            /* sem modo anterior salvo: usa o mode do conector (re-lido acima nao,
-             * entao pede de novo pelo proprio GetCrtc do modo atual) */
-            drmModeCrtc *c2 = drmModeGetCrtc(g_uk_fd, g_uk_crtc);
-            if (c2 && c2->mode_valid) { g_uk_old_mode = c2->mode; g_uk_old_mode_ok = 1; mode = &g_uk_old_mode; }
-            if (c2) drmModeFreeCrtc(c2);
-            if (!g_uk_old_mode_ok) { logmsg("[BENDER_UK_KMS] sem modo anterior; nao assumo o CRTC\n"); return -1; }
-        }
-        if (drmModeSetCrtc(g_uk_fd, g_uk_crtc, g_uk_fb, 0, 0, &g_uk_conn, 1, mode)) {
-            logmsg("[BENDER_UK_KMS] SetCrtc falhou: %s\n", strerror(errno)); return -1;
-        }
-    }
-    g_uk_undo_conn = g_uk_conn;
-    memset(&g_uk_undo, 0, sizeof g_uk_undo);
-    g_uk_kms_armed = 1;
-    atexit(uk_kms_atexit);
-    {
-        struct sigaction sa;
-        memset(&sa, 0, sizeof sa);
-        sa.sa_handler = uk_kms_sighandler;
-        sigemptyset(&sa.sa_mask);
-        sa.sa_flags = SA_RESETHAND;
-        sigaction(SIGTERM, &sa, NULL);
-        sigaction(SIGINT, &sa, NULL);
-        sigaction(SIGHUP, &sa, NULL);
+    g_uk_w = var.xres; g_uk_h = var.yres; g_uk_pitch = finfo.line_length; g_uk_bpp = var.bits_per_pixel;
+    g_uk_ro = var.red.offset; g_uk_go = var.green.offset; g_uk_bo = var.blue.offset;
+    g_uk_rl = var.red.length ? var.red.length : 8;
+    g_uk_gl = var.green.length ? var.green.length : 8;
+    g_uk_bl = var.blue.length ? var.blue.length : 8;
+    need = (size_t)finfo.line_length * (var.yres_virtual ? var.yres_virtual : var.yres);
+    g_uk_fblen = (finfo.smem_len && finfo.smem_len < need) ? finfo.smem_len : need;
+    g_uk_fbmap = mmap(0, g_uk_fblen, PROT_READ | PROT_WRITE, MAP_SHARED, g_uk_fbfd, 0);
+    if (g_uk_fbmap == MAP_FAILED) {
+        g_uk_fbmap = NULL;
+        uk_log("[BENDER_UK_PRESENT] fb0: mmap de %zu falhou: %s\n", g_uk_fblen, strerror(errno));
+        return -1;
     }
     g_uk_buf = (unsigned char *)malloc((size_t)src_w * (size_t)src_h * 4u);
-    if (!g_uk_buf) { logmsg("[BENDER_UK_KMS] sem buffer de readback\n"); return -1; }
-    g_uk_backend = 2;
-    uk_log("[BENDER_UK_KMS] scanout %ux%u assumido em %s (fb anterior=%u; devolucao armada)\n",
-           g_uk_w, g_uk_h, dev, g_uk_old_fb);
-    uk_test_pattern((unsigned char *)g_uk_map, g_uk_w, g_uk_h, g_uk_pitch);
+    if (!g_uk_buf) g_uk_buf = (unsigned char *)malloc(640u * 480u * 4u);
+    if (!g_uk_buf) { uk_log("[BENDER_UK_PRESENT] sem buffer de readback\n"); return -1; }
+    uk_log("[BENDER_UK_PRESENT] backend=fb0 %ux%u bpp=%u pitch=%u (source %dx%d) - CRTC intacto\n",
+           g_uk_w, g_uk_h, g_uk_bpp, g_uk_pitch, src_w, src_h);
+    uk_test_pattern((unsigned char *)g_uk_fbmap, g_uk_w, g_uk_h, g_uk_pitch);
+    uk_log("[BENDER_UK_PRESENT] padrao de teste pintado (tarja branca + degrade RGB). Se aparecer, o video esta vivo.\n");
     return 0;
-}
-
-static void uk_kms_blit(const unsigned char *rgba, int sw, int sh) {
-    unsigned char *base = (unsigned char *)g_uk_map;
-    unsigned y, x;
-    for (y = 0; y < g_uk_h; y++) {
-        unsigned sy = (unsigned)((unsigned long long)y * (unsigned long long)sh / (g_uk_h ? g_uk_h : 1));
-        unsigned char *drow;
-        const unsigned char *srow;
-        if (sy >= (unsigned)sh) sy = sh - 1;
-        srow = rgba + (size_t)sy * (size_t)sw * 4u;
-        drow = base + (size_t)y * g_uk_pitch;
-        for (x = 0; x < g_uk_w; x++) {
-            unsigned sx = (unsigned)((unsigned long long)x * (unsigned long long)sw / (g_uk_w ? g_uk_w : 1));
-            const unsigned char *p;
-            if (sx >= (unsigned)sw) sx = sw - 1;
-            p = srow + (size_t)sx * 4u;
-            drow[x * 4 + 0] = p[2];
-            drow[x * 4 + 1] = p[1];
-            drow[x * 4 + 2] = p[0];
-            drow[x * 4 + 3] = 0xff;
-        }
-    }
 }
 
 static void *uk_gl_addr(const char *name) {
@@ -6014,32 +5833,69 @@ static void *uk_gl_addr(const char *name) {
     return gles ? dlsym(gles, name) : NULL;
 }
 
+static void uk_fb_blit(const unsigned char *rgba, int sw, int sh) {
+    unsigned char *base = (unsigned char *)g_uk_fbmap;
+    unsigned y, x;
+    for (y = 0; y < g_uk_h; y++) {
+        unsigned sy = (unsigned)((unsigned long long)y * (unsigned long long)sh / (g_uk_h ? g_uk_h : 1));
+        unsigned char *drow;
+        const unsigned char *srow;
+        if (sy >= (unsigned)sh) sy = sh - 1;
+        if ((size_t)y * g_uk_pitch + (size_t)g_uk_w * (g_uk_bpp / 8u) > g_uk_fblen) break;
+        srow = rgba + (size_t)sy * (size_t)sw * 4u;
+        drow = base + (size_t)y * g_uk_pitch;
+        for (x = 0; x < g_uk_w; x++) {
+            unsigned sx = (unsigned)((unsigned long long)x * (unsigned long long)sw / (g_uk_w ? g_uk_w : 1));
+            const unsigned char *p;
+            if (sx >= (unsigned)sw) sx = sw - 1;
+            p = srow + (size_t)sx * 4u;
+            if (g_uk_bpp == 32) {
+                uint32_t v = ((uint32_t)(p[0] >> (8 - g_uk_rl)) << g_uk_ro)
+                           | ((uint32_t)(p[1] >> (8 - g_uk_gl)) << g_uk_go)
+                           | ((uint32_t)(p[2] >> (8 - g_uk_bl)) << g_uk_bo);
+                ((uint32_t *)drow)[x] = v;
+            } else {
+                uint16_t v = (uint16_t)(((p[0] >> (8 - g_uk_rl)) << g_uk_ro)
+                      | ((p[1] >> (8 - g_uk_gl)) << g_uk_go)
+                      | ((p[2] >> (8 - g_uk_bl)) << g_uk_bo));
+                ((uint16_t *)drow)[x] = v;
+            }
+        }
+    }
+}
+
+static void uk_present_init(int w, int h) {
+    const char *off = getenv("BENDER_UK_PRESENT");
+    if (off && !strcmp(off, "off")) {
+        g_uk_off = 1;
+        uk_log("[BENDER_UK_PRESENT] desligado por BENDER_UK_PRESENT=off\n");
+        return;
+    }
+    if (uk_fb_init(w, h) != 0) {
+        g_uk_off = 1;
+        uk_log("[BENDER_UK_PRESENT] fb0 indisponivel; rodando HEADLESS (sem KMS, para nao sequestrar a tela)\n");
+    }
+}
+
 static void uk_present(int w, int h) {
     size_t total, k, nz = 0;
-    if (g_uk_off || !g_uk_buf || w <= 0 || h <= 0) return;
+    if (g_uk_off || !g_uk_buf || !g_uk_fbmap || w <= 0 || h <= 0) return;
     if (!g_uk_read) {
         g_uk_read = (UkReadPixelsFn)uk_gl_addr("glReadPixels");
-        if (!g_uk_read) { g_uk_off = 1; uk_log("[BENDER_UK_PRESENT] glReadPixels ausente; present desligado\n"); return; }
+        if (!g_uk_read) {
+            g_uk_off = 1;
+            uk_log("[BENDER_UK_PRESENT] glReadPixels ausente; blit desligado\n");
+            return;
+        }
     }
     g_uk_read(0, 0, w, h, 0x1908 /*GL_RGBA*/, 0x1401 /*GL_UNSIGNED_BYTE*/, g_uk_buf);
-    if (g_uk_backend == 1 && g_fb_map) uk_fb_blit(g_uk_buf, w, h);
-    else if (g_uk_backend == 2 && g_uk_map) uk_kms_blit(g_uk_buf, w, h);
-    else return;
+    uk_fb_blit(g_uk_buf, w, h);
     g_uk_present_calls++;
     total = (size_t)w * (size_t)h * 4u;
     for (k = 0; k < total; k++) if (g_uk_buf[k]) nz++;
     if (g_uk_present_calls <= 5ul || g_uk_present_calls % 300ul == 0ul)
-        uk_log("[BENDER_UK_PRESENT] frame=%lu backend=%s readback=%dx%d bytes_iguais_zero=%zu/%zu\n",
-               g_uk_present_calls, g_uk_backend == 1 ? "fb0" : "kms", w, h, total - nz, total);
-}
-
-static void uk_present_init(int w, int h) {
-    const char *force = getenv("BENDER_UK_PRESENT");
-    if (force && !strcmp(force, "off")) { g_uk_off = 1; uk_log("[BENDER_UK_PRESENT] desligado por BENDER_UK_PRESENT=off\n"); return; }
-    if ((!force || strcmp(force, "kms")) && uk_fb_init(w, h) == 0) return;
-    if ((!force || strcmp(force, "fb0")) && uk_kms_init(w, h) == 0) return;
-    g_uk_off = 1;
-    uk_log("[BENDER_UK_PRESENT] nenhum backend disponivel (fb0 e KMS falharam)\n");
+        uk_log("[BENDER_UK_PRESENT] frame=%lu readback=%dx%d bytes_iguais_zero=%zu/%zu\n",
+               g_uk_present_calls, w, h, total - nz, total);
 }
 
 static BenderEGLBoolean bender_eglSwapBuffers(BenderEGLDisplay d,BenderEGLSurface s){
