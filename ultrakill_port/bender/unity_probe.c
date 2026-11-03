@@ -4838,23 +4838,45 @@ static BenderEGLBoolean bender_eglChooseConfig(BenderEGLDisplay d,const BenderEG
     BenderEGLBoolean rc=f(d,attrs,configs,config_size,num);
     int raw_num=(rc&&num)?*num:0;
     logmsg("[BENDER_EGL][CHOOSE_CONFIG][RAW] rc=%u num=%d err=0x%x\n",rc,raw_num,(unsigned)bender_host_egl_error());
-    if(rc&&raw_num==0){
-        BenderEGLint pb[80];int n=0,i,havest=0;
-        if(attrs){for(i=0;i<64&&n<72;i+=2){BenderEGLint a=attrs[i];if(a==BENDER_EGL_NONE)break;BenderEGLint v=attrs[i+1];
-                    if(a==BENDER_EGL_SURFACE_TYPE){v=(v&~BENDER_EGL_WINDOW_BIT)|BENDER_EGL_PBUFFER_BIT;if(!v)v=BENDER_EGL_PBUFFER_BIT;havest=1;}
-                    pb[n++]=a;pb[n++]=v;}}
-        if(!havest){pb[n++]=BENDER_EGL_SURFACE_TYPE;pb[n++]=BENDER_EGL_PBUFFER_BIT;}
-        pb[n++]=BENDER_EGL_NONE;
-        BenderEGLint n2=0;
-        BenderEGLBoolean rc2=f(d,pb,configs,config_size,&n2);
-        logmsg("[BENDER_EGL][CHOOSE_CONFIG][RAW_PBUFFER] rc=%u num=%d err=0x%x\n",rc2,n2,(unsigned)bender_host_egl_error());
-        if(rc2&&n2>0){
-            g_bender_pb_cfg=(configs&&config_size>0)?configs[0]:0;
-            if(!g_bender_pb_cfg)g_bender_pb_cfg=(BenderEGLConfig)(uintptr_t)1;
-            g_bender_pb_cfg_ok=1;
-            if(num)*num=n2;
-            return BENDER_EGL_TRUE;
+    if((!rc||raw_num==0)&&!g_bender_sdl_ready){
+        /* pass 1 = mesmos atributos do Unity com SURFACE_TYPE forcado em
+         * PBUFFER; pass 2 = lista minima que qualquer Mesa surfaceless
+         * aceita (RGBA8888 + depth24 + stencil8 + ES2|ES3, pbuffer). */
+        static const BenderEGLint minimal[]={BENDER_EGL_SURFACE_TYPE,BENDER_EGL_PBUFFER_BIT,
+            0x3024,8,0x3023,8,0x3022,8,0x3021,8,0x3025,24,0x3026,8,
+            BENDER_EGL_RENDERABLE_TYPE,0x0044,BENDER_EGL_NONE};
+        BenderEGLint pb[80];
+        int n=0,i,havest=0,pass;
+        for(pass=1;pass<=2;pass++){
+            BenderEGLint n2=0;BenderEGLBoolean rc2;
+            const BenderEGLint *req;
+            if(pass==1){
+                n=0;havest=0;
+                if(attrs){for(i=0;i<64&&n<72;i+=2){BenderEGLint at=attrs[i];if(at==BENDER_EGL_NONE)break;
+                    BenderEGLint v=attrs[i+1];
+                    if(at==BENDER_EGL_SURFACE_TYPE){v=(v&~BENDER_EGL_WINDOW_BIT)|BENDER_EGL_PBUFFER_BIT;if(!v)v=BENDER_EGL_PBUFFER_BIT;havest=1;}
+                    pb[n++]=at;pb[n++]=v;}}
+                if(!havest){pb[n++]=BENDER_EGL_SURFACE_TYPE;pb[n++]=BENDER_EGL_PBUFFER_BIT;}
+                pb[n++]=BENDER_EGL_NONE;
+                req=pb;
+            } else {
+                req=minimal;
+            }
+            bender_host_egl_error();
+            rc2=f(d,req,configs,config_size,&n2);
+            logmsg("[BENDER_EGL][CHOOSE_CONFIG][RAW_PBUFFER] pass=%d rc=%u num=%d err=0x%x\n",
+                   pass,rc2,n2,(unsigned)bender_host_egl_error());
+            if(rc2&&n2>0){
+                g_bender_pb_cfg=(configs&&config_size>0)?configs[0]:(BenderEGLConfig)0;
+                if(!g_bender_pb_cfg)g_bender_pb_cfg=(BenderEGLConfig)(uintptr_t)1;
+                g_bender_pb_cfg_ok=1;
+                if(num)*num=n2;
+                logmsg("[BENDER_EGL][CHOOSE_CONFIG][FORCED_PBUFFER] aceito pass=%d configs=%d primeiro=%p\n",
+                       pass,n2,(void*)g_bender_pb_cfg);
+                return BENDER_EGL_TRUE;
+            }
         }
+        logmsg("[BENDER_EGL][CHOOSE_CONFIG][FORCED_PBUFFER][FAIL] nenhuma lista pbuffer foi aceita\n");
     }
     return rc;
 }
