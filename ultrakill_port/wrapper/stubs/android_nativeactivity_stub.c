@@ -5,8 +5,10 @@
  * No bridge, rodamos uma SDL2 event loop - entao ALooper_pollAll so
  * precisa "dormir" ate ser wakeado via write num pipe. */
 #include <android_shim.h>
+#include "../gl/shim_native_window.h"
 #include <errno.h>
 #include <poll.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
@@ -143,17 +145,40 @@ int32_t AConfiguration_getScreenSize(const AConfiguration *c) { (void)c; return 
 __attribute__((visibility("default")))
 int32_t AConfiguration_getScreenDensity(const AConfiguration *c) { (void)c; return 160; }
 
-/* -------- ANativeWindow: minimal, backed by nothing (SDL cuida disso) ---- */
+/* ANativeWindow: as medidas SAO LIDAS PELO UNITY. Antes estas tres
+ * funcoes devolviam 1280x720 HARDCODED enquanto o EGL surface real e
+ * 480x360: o Unity 2019.4 usa getWidth/getHeight para dimensionar os
+ * buffers de janela/backing e passa a operar com um tamanho que nao
+ * bate com a surface - diferencas de offset assim sao a receita classica
+ * pra SIGBUS (bus error) no resume, que e exatamente onde o device
+ * morava. Agora devolvemos o tamanho VERDADEIRO do shim. */
+extern ANativeWindow *ANativeWindow_get_shim(void);
+
+static struct shim_native_window *real_win(ANativeWindow *w) {
+  struct shim_native_window *c = (struct shim_native_window*)ANativeWindow_get_shim();
+  if (shim_anw_is_shim((void*)w)) return (struct shim_native_window*)w;
+  return (c && c->magic == SHIM_ANW_MAGIC) ? c : NULL;
+}
+
 __attribute__((visibility("default")))
 ANativeWindow *ANativeWindow_acquire(ANativeWindow *w) { return w; }
 __attribute__((visibility("default")))
 ANativeWindow *ANativeWindow_release(ANativeWindow *w) { return w; }
 __attribute__((visibility("default")))
-int32_t ANativeWindow_getWidth(ANativeWindow *w)  { (void)w; return 1280; }
+int32_t ANativeWindow_getWidth(ANativeWindow *w) {
+  struct shim_native_window *r = real_win(w);
+  return r && r->w > 0 ? (int32_t)r->w : 480;
+}
 __attribute__((visibility("default")))
-int32_t ANativeWindow_getHeight(ANativeWindow *w) { (void)w; return 720; }
+int32_t ANativeWindow_getHeight(ANativeWindow *w) {
+  struct shim_native_window *r = real_win(w);
+  return r && r->h > 0 ? (int32_t)r->h : 360;
+}
 __attribute__((visibility("default")))
-int32_t ANativeWindow_getFormat(ANativeWindow *w) { (void)w; return 1; /* RGBA_8888 */ }
+int32_t ANativeWindow_getFormat(ANativeWindow *w) {
+  struct shim_native_window *r = real_win(w);
+  return r && r->format ? r->format : 1;   /* RGBA_8888 */
+}
 
 /* ANativeWindow_fromSurface: no bridge nao ha Surface real; devolvemos o
  * shim ANativeWindow ja em uso (ou NULL). Unity so usa p/ obter a window a
@@ -162,13 +187,20 @@ int32_t ANativeWindow_getFormat(ANativeWindow *w) { (void)w; return 1; /* RGBA_8
 __attribute__((visibility("default")))
 ANativeWindow *ANativeWindow_fromSurface(void *env, void *surface) {
   (void)env; (void)surface;
-  extern ANativeWindow *ANativeWindow_get_shim(void);
   return ANativeWindow_get_shim();
 }
 __attribute__((visibility("default")))
 int32_t ANativeWindow_setBuffersGeometry(ANativeWindow *w, int32_t fw,
                                          int32_t fh, int32_t fmt) {
-  (void)w; (void)fw; (void)fh; (void)fmt; return 0;
+  struct shim_native_window *r = real_win(w);
+  if (r && fw > 0 && fh > 0) {
+    /* anota o que o Unity pediu; se ele pedir um tamanho diferente do
+     * surface, isso aparece no log e explica qualquer discrepancia. */
+    fprintf(stderr, "stub: ANativeWindow_setBuffersGeometry(%dx%d fmt=%d) - window e %dx%d\n",
+            fw, fh, fmt, r->w, r->h);
+  }
+  (void)fmt;
+  return 0;
 }
 
 /* -------- __system_property_* (Bionic libc) --------

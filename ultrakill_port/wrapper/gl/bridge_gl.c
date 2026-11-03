@@ -498,8 +498,8 @@ shim_gl_status shim_gl_init(shim_gl_ctx *out, int w, int h, const char *title) {
       }
       if (out->pixel_buf)
         fprintf(stderr, "bridge_gl: readback %dx%d (%zu bytes)\n", w, h, (size_t)w * h * 4);
-      else
-        fprintf(stderr, "bridge_gl: AVISO: sem pixel_buf (malloc falhou?)\n");
+      else if (out->kms_ready || out->fb_ready || out->sdl_renderer)
+        fprintf(stderr, "bridge_gl: AVISO: backend de present pronto mas sem pixel_buf (malloc falhou?)\n");
     }
   }
 

@@ -336,8 +336,25 @@ static void crash_dump_map(const char *fname) {
   close(fd);
 }
 
+/* ---- infraestrutura do interposer de sigaction()/signal() ----
+ * Ficam aqui (e nao no fim do arquivo) porque o guard_handler precisa dos
+ * ponteiros REAIS para fazer o re-raise: chamar o nosso signal() dentro do
+ * handler recusaria SIG_DFL e cairia em recursao (era isto que devolvia
+ * exit 135 sem impressao nenhuma). */
+typedef int (*sigact_fn)(int, const struct sigaction *, struct sigaction *);
+typedef void (*sighandler_t_fn)(int);
+typedef sighandler_t_fn (*sigset_fn)(int, sighandler_t_fn);
+static struct sigaction g_ours_action;
+static int              g_ours_valid;
+static sigact_fn        g_real_sigaction;
+static sigset_fn        g_real_signal;
+
 static void guard_handler(int sig, siginfo_t *si, void *u) {
-  if (in_handler) _exit(128 + sig);   /* no recursion */
+  if (in_handler) {
+    /* recursao: o primeiro print ja deve estar no ficheiro; sai limpo */
+    if (g_real_signal) (*g_real_signal)(sig, SIG_DFL);
+    _exit(128 + sig);
+  }
   in_handler = 1;
 
   crash_puts("\n[guard] *** ");
@@ -379,8 +396,9 @@ static void guard_handler(int sig, siginfo_t *si, void *u) {
   }
   (void)lm;
 
-  /* re-raise com default para core dump (se habilitado) */
-  signal(sig, SIG_DFL);
+  /* re-raise com default para core dump (se habilitado) - SEMPRE pelo
+   * signal real, senao o nosso interposer recusa e entrariamos em loop */
+  if (g_real_signal) (*g_real_signal)(sig, SIG_DFL);
   raise(sig);
 }
 
@@ -395,17 +413,91 @@ int shim_shader_install_guard(void) {
     const char *cf = getenv("ULTRAKILL_CRASHFILE");
     if (cf && *cf) g_crashfd = open(cf, O_WRONLY | O_APPEND | O_CREAT, 0644);
   }
+  if (!g_real_sigaction) {
+    g_real_sigaction = (sigact_fn)dlsym(RTLD_NEXT, "sigaction");
+    g_real_signal    = (sigset_fn)dlsym(RTLD_NEXT, "signal");
+  }
+  sigact_fn rs = g_real_sigaction;
+  if (!rs) { LOG("[shader_stub] SEM sigaction real (RTLD_NEXT) - guard nao instalado\n"); return -1; }
   for (size_t i = 0; i < sizeof sigs / sizeof *sigs; i++) {
-    if (sigaction(sigs[i], &sa, NULL) != 0) {
+    if ((*rs)(sigs[i], &sa, NULL) != 0) {
       LOG("[shader_stub] sigaction(%s) falhou: %s\n",
           strsignal(sigs[i]), strerror(errno));
       rc--;
     }
   }
+  /* memoriza o NOSSO action: o interposer abaixo usa isto para recusar
+   * qualquer tentativa de tirar o guard dos sinais de morte. */
+  g_ours_action = sa;
+  g_ours_valid  = 1;
   LOG("[shader_stub] guard instalado em %zu signals (rc=%d)\n",
       sizeof sigs / sizeof *sigs, rc);
   log_init();
   return rc;
+}
+
+/* ===== INTERPOSICAO DE sigaction()/signal() NO PROPRIO EXECUTAVEL ======
+ * O dynsym do executavel e varrido ANTES do de qualquer .so, entao
+ * libunity.so / libil2cpp.so, quando chamam sigaction() para instalar o
+ * crash reporter delas, caem AQUI. Nos dois runs do device o guard ficou
+ * MUDO (SIGBUS sem nenhuma linha de [guard]) justamente porque o Unity
+ * substituiu o nosso handler na thread de render. A partir daqui isso e
+ * impossivel: sinais de morte nunca sao cedidos; os outros passam ao
+ * sigaction real. Cada tentativa recusada e logada com modulo+offset de
+ * quem chamou - diz qual componente brigava pelo handler. */
+static int is_fatal_sig(int s) {
+  switch (s) {
+    case SIGSEGV: case SIGBUS: case SIGILL: case SIGTRAP:
+    case SIGABRT: case SIGFPE: return 1;
+    default: return 0;
+  }
+}
+static void log_thief(int sig, const void *ra) {
+  Dl_info di;
+  if (g_crashfd < 0) {
+    const char *cf = getenv("ULTRAKILL_CRASHFILE");
+    if (cf && *cf) g_crashfd = open(cf, O_WRONLY | O_APPEND | O_CREAT, 0644);
+  }
+  if (dladdr(ra, &di) && di.dli_fname) {
+    char b[256];
+    int n = snprintf(b, sizeof b, "[guard] sigaction(sig=%d) de %s + %#x FOI RECUSADA\n",
+                     sig, di.dli_fname,
+                     (unsigned)((uintptr_t)ra - (uintptr_t)di.dli_fbase));
+    if (n > 0) crash_w(b, (size_t)n);
+  } else {
+    crash_w("[guard] sigaction de origem desconhecida FOI RECUSADA\n", 52);
+  }
+}
+
+int sigaction(int sig, const struct sigaction *act, struct sigaction *old) {
+  sigact_fn rs = g_real_sigaction;
+  if (!rs) {
+    rs = (sigact_fn)dlsym(RTLD_NEXT, "sigaction");
+    g_real_sigaction = rs;
+  }
+  if (!rs) { errno = ENOSYS; return -1; }
+  if (g_ours_valid && is_fatal_sig(sig) && act &&
+      act->sa_sigaction != g_ours_action.sa_sigaction &&
+      act->sa_handler != g_ours_action.sa_handler) {
+    log_thief(sig, __builtin_return_address(0));
+    if (old) *old = g_ours_action;
+    return 0;   /* recusa educada: nosso guard continua no lugar */
+  }
+  return (*rs)(sig, act, old);
+}
+
+sighandler_t_fn signal(int sig, sighandler_t_fn h) {
+  sigset_fn rs = g_real_signal;
+  if (!rs) {
+    rs = (sigset_fn)dlsym(RTLD_NEXT, "signal");
+    g_real_signal = rs;
+  }
+  if (!rs) { errno = ENOSYS; return SIG_ERR; }
+  if (g_ours_valid && is_fatal_sig(sig) && h != (sighandler_t_fn)guard_handler) {
+    log_thief(sig, __builtin_return_address(0));
+    return (sighandler_t_fn)g_ours_action.sa_handler;
+  }
+  return (*rs)(sig, h);
 }
 
 /* O Unity re-instala os handlers dele na thread do RENDER (depois do nosso
