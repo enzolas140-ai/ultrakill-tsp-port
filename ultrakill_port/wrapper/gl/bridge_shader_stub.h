@@ -79,6 +79,12 @@ void shim_shader_probe_free(shim_shader_probe_result *r);
  * default (core dump / exit). */
 int shim_shader_install_guard(void);
 
+/* Re-escreve os sigaction do guard a cada 40ms numa thread propria, porque o
+ * Unity re-instala os handlers dele na thread de render DEPOIS de nos termos
+ * armado. Sem isto o crash fica mudo (aconteceu no device: SIGBUS em
+ * nativeResume sem nenhuma linha de [guard] no log). */
+int shim_shader_start_guard_watchdog(void);
+
 /* -------- hook registry -------- */
 typedef enum {
   SHIM_HOOK_NOT_INSTALLED = 0,

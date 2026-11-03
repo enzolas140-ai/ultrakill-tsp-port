@@ -263,6 +263,13 @@ int main(int argc, char **argv, char **envp) {
       }
       if (fnResume) { fprintf(stderr, "chamando nativeResume()\n");
                       shim_shader_install_guard();
+                      /* O device mostrou: SIGBUS DENTRO do nativeResume sem
+                       * nenhuma linha de [guard] - o Unity repoe os handlers
+                       * dele na thread de render logo ali. O watchdog
+                       * re-escreve os nossos a cada 40ms, entao o proximo
+                       * crash imprime pc/si_addr/modulo+offset (e o offset
+                       * resolve offline no nosso libunity.so). */
+                      shim_shader_start_guard_watchdog();
                       ((Fn_V_noargs)fnResume)(env, NULL);
                       fprintf(stderr, "resume voltou\n"); }
 

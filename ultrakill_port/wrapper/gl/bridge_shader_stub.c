@@ -21,6 +21,8 @@
 #include <stdlib.h>
 #include <string.h>
 #include <errno.h>
+#include <pthread.h>
+#include <fcntl.h>
 #include <sys/mman.h>
 #include <ucontext.h>
 #include <unistd.h>
@@ -276,23 +278,82 @@ static void safe_putx(uintptr_t v) {
   if (n > 0) { ssize_t r = write(2, buf, n); (void)r; }
 }
 
+/* --- espelho do crash para um FICHEIRO no SD -----------------------------
+ * O Unity 2019 redireciona/fecha o stderr dele durante o boot do player, e
+ * ai o handler escreve num fd que ja nao e o nosso log (foi assim que o
+ * SIGBUS do device ficou mudo). Abrimos NOSSO proprio fd (append, sem
+ * stdio, sem malloc) e escrevemos nos DOIS. */
+static volatile int g_crashfd = -1;
+static void crash_w(const char *s, size_t n) {
+  ssize_t r;
+  int fd;
+  if (s && n) {
+    r = write(2, s, n); (void)r;
+    fd = g_crashfd;
+    if (fd >= 0) { r = write(fd, s, n); (void)r; }
+  }
+}
+static void crash_puts(const char *s) { if (s) crash_w(s, strlen(s)); }
+static void crash_putx(uintptr_t v) {
+  char buf[32];
+  int n = snprintf(buf, sizeof buf, "0x%lx\n", (unsigned long)v);
+  if (n > 0) crash_w(buf, (size_t)n);
+}
+
+/* Linha de /proc/self/maps que contem o modulo indicado (so syscalls). */
+static void crash_dump_map(const char *fname) {
+  char buf[1024];
+  size_t used = 0;
+  int fd;
+  const char *base;
+  ssize_t r;
+  int hits = 0;
+  if (!fname || !*fname) return;
+  fd = open("/proc/self/maps", O_RDONLY);
+  if (fd < 0) return;
+  base = strrchr(fname, '/');
+  base = base ? base + 1 : fname;
+  while ((r = read(fd, buf + used, sizeof(buf) - 1 - used)) > 0) {
+    char *nl;
+    used += (size_t)r;
+    buf[used] = 0;
+    while ((nl = memchr(buf, '\n', used)) != NULL) {
+      size_t linelen = (size_t)(nl - buf);
+      *nl = 0;
+      if (linelen < sizeof(buf) && strstr(buf, base) && hits < 4) {
+        crash_puts("  maps: "); crash_puts(buf); crash_puts("\n");
+        hits++;
+      }
+      used -= linelen + 1;
+      memmove(buf, nl + 1, used);
+      buf[used] = 0;
+    }
+    if (used >= sizeof(buf) - 1) { used = 0; buf[0] = 0; }  /* linha gigante */
+  }
+  if (used && strstr(buf, base) && hits < 4) {
+    crash_puts("  maps: "); crash_puts(buf); crash_puts("\n");
+  }
+  close(fd);
+}
+
 static void guard_handler(int sig, siginfo_t *si, void *u) {
   if (in_handler) _exit(128 + sig);   /* no recursion */
   in_handler = 1;
 
-  safe_puts("\n[guard] *** ");
-  safe_puts(signame(sig));
-  safe_puts(" em pc=");
-  safe_putx(pc_from_uc(u));
-  safe_puts(" si_addr=");
-  safe_putx(fault_addr_from_si(si, sig));
-  safe_puts(" ***\n");
+  crash_puts("\n[guard] *** ");
+  crash_puts(signame(sig));
+  crash_puts(" em pc=");
+  crash_putx(pc_from_uc(u));
+  crash_puts("[guard] si_addr=");
+  crash_putx(fault_addr_from_si(si, sig));
+  crash_puts("  ***\n");
 
   /* backtrace com libunwind/execinfo */
   void *bt[32];
   int n = backtrace(bt, 32);
-  safe_puts("[guard] backtrace:\n");
+  crash_puts("[guard] backtrace:\n");
   backtrace_symbols_fd(bt, n, 2);
+  if (g_crashfd >= 0) backtrace_symbols_fd(bt, n, g_crashfd);
 
   /* lista de DSOs (dl_iterate_phdr nao eh async-safe, mas em crash
    * normalmente da pra chamar sem dead-lock) */
@@ -301,22 +362,20 @@ static void guard_handler(int sig, siginfo_t *si, void *u) {
   Dl_info info;
   uintptr_t pc = pc_from_uc(u);
   if (dladdr((void*)pc, &info)) {
-    safe_puts("  pc esta em: ");
-    safe_puts(info.dli_fname ? info.dli_fname : "(anon)");
-    safe_puts("  sym=");
-    safe_puts(info.dli_sname ? info.dli_sname : "(nao exportado)");
-    safe_puts("  symbase=");
-    safe_putx((uintptr_t)info.dli_saddr);
-    safe_puts("  loadbase=");
-    safe_putx((uintptr_t)info.dli_fbase);
-    safe_puts("\n");
-    safe_puts("  -> offset no arquivo: ");
-    safe_putx(pc - (uintptr_t)info.dli_fbase);
-    safe_puts("\n  offline: aarch64-linux-gnu-addr2line -e ");
-    safe_puts(info.dli_fname ? info.dli_fname : "libunity.so");
-    safe_puts(" 0x");
-    safe_putx(pc - (uintptr_t)info.dli_fbase);
-    safe_puts("\n");
+    crash_puts("  pc esta em: ");
+    crash_puts(info.dli_fname ? info.dli_fname : "(anon)");
+    crash_puts("  sym=");
+    crash_puts(info.dli_sname ? info.dli_sname : "(nao exportado)");
+    crash_puts("  symbase=");
+    crash_putx((uintptr_t)info.dli_saddr);
+    crash_puts("  loadbase=");
+    crash_putx((uintptr_t)info.dli_fbase);
+    crash_puts("  -> offset no arquivo: ");
+    crash_putx(pc - (uintptr_t)info.dli_fbase);
+    crash_puts("  offline: aarch64-linux-gnu-objdump -d --start-address=0x");
+    crash_puts(info.dli_fname ? info.dli_fname : "libunity.so");
+    crash_puts("\n");
+    crash_dump_map(info.dli_fname);
   }
   (void)lm;
 
@@ -332,6 +391,10 @@ int shim_shader_install_guard(void) {
   sigemptyset(&sa.sa_mask);
   int rc = 0;
   int sigs[] = { SIGSEGV, SIGABRT, SIGILL, SIGTRAP, SIGBUS, SIGFPE };
+  if (g_crashfd < 0) {
+    const char *cf = getenv("ULTRAKILL_CRASHFILE");
+    if (cf && *cf) g_crashfd = open(cf, O_WRONLY | O_APPEND | O_CREAT, 0644);
+  }
   for (size_t i = 0; i < sizeof sigs / sizeof *sigs; i++) {
     if (sigaction(sigs[i], &sa, NULL) != 0) {
       LOG("[shader_stub] sigaction(%s) falhou: %s\n",
@@ -343,6 +406,32 @@ int shim_shader_install_guard(void) {
       sizeof sigs / sizeof *sigs, rc);
   log_init();
   return rc;
+}
+
+/* O Unity re-instala os handlers dele na thread do RENDER (depois do nosso
+ * re-arm), entao rearmar uma vez nao basta. Esta thread re-escreve os nossos
+ * sigaction a cada 40ms ate o processo morrer - quem ganhar a corrida e quem
+ * imprime o PC do crash, e 40ms e muito menos que o tempo entre o resume e o
+ * crash. */
+static volatile int g_wd_stop = 0;
+static void *guard_wd(void *v) {
+  (void)v;
+  while (!g_wd_stop) {
+    shim_shader_install_guard();
+    usleep(40000);
+  }
+  return NULL;
+}
+
+int shim_shader_start_guard_watchdog(void) {
+  pthread_t t;
+  pthread_attr_t a;
+  pthread_attr_init(&a);
+  pthread_attr_setdetachstate(&a, PTHREAD_CREATE_DETACHED);
+  int r = pthread_create(&t, &a, guard_wd, NULL);
+  pthread_attr_destroy(&a);
+  LOG("[shader_stub] watchdog de guard: %s\n", r == 0 ? "rodando" : "FALHOU");
+  return r;
 }
 
 /* =========================================================================
