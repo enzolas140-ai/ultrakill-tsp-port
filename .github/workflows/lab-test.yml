@@ -1,25 +1,31 @@
-name: lab-test (headless ARM64 + screenshot)
+name: lab-test (headless ARM64 + gdb no crash)
 
 # Laboratorio virtual: roda o bridge num Linux ARM64 real (mesma arch do
-# TSP) com tela Xvfb + OpenGL por software (llvmpipe). Produz artifact com
-# ultrakill.log, player.log e screenshot.png - nada de precisar do cartao.
+# cartao) COM GDB, nas MESMAS condicoes do bisect headless do device:
+#   ULTRAKILL_NO_SDL_GL=1 + EGL_PLATFORM=surfaceless + sem KMS/fb0.
+# OBJETIVO: o device mostra SIGBUS (exit 135) dentro de nativeResume, e o
+# bisect headless provou que NAO e do nosso caminho de apresentacao. Aqui
+# o mesmo crash deve aparecer com BACKTRACE + modulo + offset, sem
+# precisar do cartao. Produz o artifact lab-run com o trace do gdb.
 #
 # Pre-requisitos (uma vez so): release "payload" contendo
-#   lab-payload.tar.gz  (gamedata/lib/arm64-v8a patcheados + libs SDL2 blob
-#                        + libs/arm64 alias libc.so etc)
-#   ULTRADROID.apk      (fonte p/ extrair gamedata se precisar)
+#   lab-payload.tar.gz  (gamedata patcheados + Data + bundle de shaders)
 
 on:
   workflow_dispatch:
     inputs:
       xvfb_res:
-        description: 'resolucao Xvfb LARGAExALTA'
+        description: 'resolucao Xvfb LARGAExALTA (so p/ modo x11)'
         required: false
         default: '1280x720x24'
       run_seconds:
-        description: 'segundos de execucao do bridge'
+        description: 'segundos de execucao do bridge sob gdb'
         required: false
-        default: '60'
+        default: '90'
+      videodriver:
+        description: 'SDL_VIDEODRIVER: offscreen (=device) ou x11'
+        required: false
+        default: 'offscreen'
 
 jobs:
   lab:
@@ -27,16 +33,16 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: install runtime deps
+      - name: install runtime deps (gdb e o core do crash)
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
-            xvfb x11-utils imagemagick xterm \
-            libgl1 libglx-mesa0 libegl1 libgles2 \
+            gdb xvfb x11-utils imagemagick xterm \
+            libgl1 libglx-mesa0 libegl1 libgles2 libdrm2 libgbm1 \
             libsdl2-2.0-0 libsdl2-dev unzip build-essential cmake
-          # llvmpipe garante GL 3.x por software via mesa
           grep -c '^processor' /proc/cpuinfo
           free -m | head -2
+          mesa-version 2>/dev/null || dpkg -l | grep -E 'libegl1|mesa' | head -5
 
       - name: build wrapper (stubs + bridge)
         working-directory: ultrakill_port/wrapper
@@ -49,14 +55,12 @@ jobs:
           set -e
           gh release download payload -R $GITHUB_REPOSITORY -p 'lab-payload.tar.gz'
           tar xzf lab-payload.tar.gz -C ultrakill_port
-          # SDL2 real do apt (com X11+GL) no lugar do blob portmaster
           SDL=$(dpkg -L libsdl2-2.0-0 | grep -m1 'libSDL2-2.0.so.0$' || true)
           echo "SDL2 do sistema: $SDL"
           ln -sf "$SDL" ultrakill_port/libs/arm64/libSDL2-2.0.so.0
-          ln -sf "$SDL" ultrakill_port/libs/arm64/libSDL2-2.0.so
-          ls -la ultrakill_port/libs/arm64 | head -30
+          ln -sf "$SDL" ultrakill_port/libs/arm64/libSDL2.so
           ls -la ultrakill_port/gamedata/lib/arm64-v8a
-          ls -la ultrakill_port/gamedata/aa/Android | head -10
+          ls -la ultrakill_port/gamedata/aa/Android 2>/dev/null | head -10
         env:
           GH_TOKEN: ${{ github.token }}
 
@@ -68,58 +72,83 @@ jobs:
             ultrakill_port/gamedata/lib/arm64-v8a/libil2cpp.so \
             ultrakill_port/gamedata/lib/arm64-v8a/libmain.so \
             ultrakill_port/gamedata/lib/arm64-v8a/libstub.so 2>/dev/null || true
-          # Lab nao usa LD_PRELOAD (SDL e x11/GLX real do Mesa). Para o
-          # libunity ainda cair no NOSSO shim sem colidir de SONAME com o
-          # Mesa, renomeamos o shim p/ libeglshm.so (cabe no slot dynstr de
-          # 'libEGL.so') e reescrevemos o DT_NEEDED do libunity.
+          # Lab nao usa LD_PRELOAD. Para o libunity cair no NOSSO shim sem
+          # colidir SONAME com o Mesa, renomeamos o shim p/ libeglshm.so.
           cp ultrakill_port/libs/arm64/libEGL.so.1 ultrakill_port/libs/arm64/libeglshm.so
           python ultrakill_port/tools/rename_needed.py \
             ultrakill_port/gamedata/lib/arm64-v8a/libunity.so libEGL.so libeglshm.so
 
-      - name: run bridge headless
+      - name: run bridge sob gdb (modo igual ao bisect do device)
         run: |
           set -x
           PD=$(pwd)/ultrakill_port
-          mkdir -p /tmp/uk
-          Xvfb :9 -screen 0 ${XVFB_RES} > /tmp/xvfb.log 2>&1 &
-          sleep 2
-          export DISPLAY=:9
+          mkdir -p /tmp/uk /tmp/lab
+          if [ "$VIDEO" = x11 ]; then
+            Xvfb :9 -screen 0 ${XVFB_RES} > /tmp/xvfb.log 2>&1 &
+            sleep 2; export DISPLAY=:9
+          fi
           export LD_LIBRARY_PATH="$PD/libs/arm64:$PD/gamedata/lib/arm64-v8a:/usr/lib/aarch64-linux-gnu"
-          # SEM LD_PRELOAD aqui: SDL roda x11/GLX (Mesa real), e preload do
-          # shim faria bridge_gl/shim conversarem consigo mesmos (SONAME
-          # colidente). O shim ainda e achado via DT_NEEDED "libEGL.so" do
-          # libunity (libs/arm64/libEGL.so) - mesmo que no TSP.
           export ULTRAKILL_REAL_LIBEGL=/usr/lib/aarch64-linux-gnu/libEGL.so.1
           export ULTRAKILL_LIBUNITY="$PD/gamedata/lib/arm64-v8a/libunity.so"
           export ULTRAKILL_ASSET_ROOT="$PD/gamedata"
-          export SDL_VIDEODRIVER=x11
+          export ULTRAKILL_PERSIST=/tmp/uk
+          export ULTRAKILL_CRASHFILE=/tmp/lab/crash.log
+          # MESMOS knobs do launcher do cartao (headless = o caso que SIGBUSa)
+          export ULTRAKILL_NO_SDL_GL=1
+          export ULTRAKILL_EGL_SURFACELESS=1
+          export ULTRAKILL_SKIP_FOCUS=1
+          export ULTRAKILL_NO_FB=1
+          export EGL_PLATFORM=surfaceless
+          export SDL_VIDEODRIVER="$VIDEO"
           export GALLIUM_DRIVER=llvmpipe
-          export MESA_GL_VERSION_OVERRIDE=3.2
-          export MESA_GLES_VERSION_OVERRIDE=3.2
+          export MESA_GL_VERSION_OVERRIDE=3.2 MESA_GLES_VERSION_OVERRIDE=3.2
+          export EGL_LOG_LEVEL=debug
           export HOME=/tmp/uk
           cd "$PD/gamedata/bin"
-          timeout ${RUN_SECS} ./ultrakill -screen-width 480 -screen-height 270 \
-            -screen-fullscreen 0 -logFile /tmp/uk/player.log \
-            > /tmp/ultrakill.log 2>&1 || echo "exit=$?" >> /tmp/ultrakill.log
-          # screenshot da tela virtual (se algo desenhou, aparece aqui)
-          import -window root /tmp/screen.png 2>/dev/null || true
-          convert /tmp/screen.png /tmp/screen.jpg 2>/dev/null || true
-          tail -c 200000 /tmp/ultrakill.log > /tmp/ultrakill.tail.log || true
+          ulimit -c unlimited || true
+          timeout -s INT ${RUN_SECS} gdb -batch -nx \
+            -ex "set pagination off" \
+            -ex "set confirm off" \
+            -ex "handle SIGSEGV stop print pass" \
+            -ex "handle SIGBUS stop print pass" \
+            -ex "run" \
+            -ex "echo \n===== SINAL PAROU AQUI =====\n" \
+            -ex "bt 40" \
+            -ex "echo \n===== REGISTROS =====\n" \
+            -ex "info registers sp pc lr x0 x1 x2 x3 x30" \
+            -ex "echo \n===== INSTRUCOES EM PC =====\n" \
+            -ex "x/8i \$pc" \
+            -ex "echo \n===== THREADS =====\n" \
+            -ex "thread apply all bt 12" \
+            -ex "echo \n===== MODULOS CARREGADOS =====\n" \
+            -ex "info sharedlibrary" \
+            --args ./ultrakill -screen-width 480 -screen-height 360 \
+              -screen-fullscreen 0 -logFile /tmp/uk/player.log \
+            > /tmp/lab/gdb.txt 2>&1 || echo "exit=$?" >> /tmp/lab/gdb.txt
+          tail -40 /tmp/lab/gdb.txt
+          # log puro tambem (sem gdb) p/ comparar com o do cartao
+          timeout ${RUN_SECS} ./ultrakill -screen-width 480 -screen-height 360 \
+            -screen-fullscreen 0 -logFile /tmp/uk/player2.log \
+            > /tmp/lab/run.log 2>&1 || echo "exit=$?" >> /tmp/lab/run.log
+          cp -f /tmp/ultrakill.log /tmp/lab/ 2>/dev/null || true
+          [ -f /tmp/lab/crash.log ] || true
 
         env:
           XVFB_RES: ${{ github.event.inputs.xvfb_res || '1280x720x24' }}
-          RUN_SECS: ${{ github.event.inputs.run_seconds || '60' }}
+          RUN_SECS: ${{ github.event.inputs.run_seconds || '90' }}
+          VIDEO: ${{ github.event.inputs.videodriver || 'offscreen' }}
 
       - name: collect artifacts
         run: |
           mkdir -p out
-          cp -v /tmp/ultrakill.log out/ 2>/dev/null || true
-          cp -v /tmp/ultrakill.tail.log out/ 2>/dev/null || true
+          cp -v /tmp/lab/gdb.txt out/ 2>/dev/null || true
+          cp -v /tmp/lab/run.log out/ 2>/dev/null || true
+          cp -v /tmp/lab/crash.log out/ 2>/dev/null || true
           cp -v /tmp/uk/player.log out/player.log 2>/dev/null || true
-          cp -v /tmp/screen.png out/screen.png 2>/dev/null || true
-          cp -v /tmp/screen.jpg out/screen.jpg 2>/dev/null || true
           cp -v /tmp/xvfb.log out/xvfb.log 2>/dev/null || true
           ls -la out
+          echo "===== gdb.txt (trecho do crash) ====="
+          grep -nE "Program received|SIGBUS|SIGSEGV|^#[0-9]|pc 0x|Exit code" out/gdb.txt 2>/dev/null | head -40 || true
 
       - uses: actions/upload-artifact@v4
         with:
