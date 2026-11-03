@@ -102,6 +102,7 @@ jobs:
             cp -Lv usr/lib/llvm-11/lib/libLLVM-11.so* $A/libLLVM-11.so* $S/ 2>/dev/null || true
             cp -Lv $A/dri/swrast_dri.so $A/dri/kms_swrast_dri.so $S/dri/ 2>/dev/null || true
             cp -v usr/share/glvnd/egl_vendor.d/50_mesa.json $S/glvnd/ 2>/dev/null || true
+            chmod -R a+rwX $S   # runner precisa reescrever o json depois
             find $S -maxdepth 1 -name "*.so*" | grep -v glvndstack || true
             du -sh $S
           '
