@@ -28,6 +28,7 @@
 #include <sys/ioctl.h>
 #include <errno.h>
 #include <stdint.h>
+#include <linux/fb.h>
 #include <xf86drm.h>
 #include <xf86drmMode.h>
 #include <drm.h>
@@ -178,9 +179,11 @@ static kms_out g_kms;
 
 static int kms_open(int src_w, int src_h) {
   kms_out *k = &g_kms;
-  k->fd = open("/dev/dri/card0", O_RDWR | O_CLOEXEC);
+  const char *dev = getenv("ULTRAKILL_KMS");
+  if (!dev || !*dev) dev = "/dev/dri/card0";
+  k->fd = open(dev, O_RDWR | O_CLOEXEC);
   if (k->fd < 0) {
-    fprintf(stderr, "kms: open card0 falhou: %s\n", strerror(errno));
+    fprintf(stderr, "kms: open %s falhou: %s\n", dev, strerror(errno));
     return -1;
   }
   drmModeRes *res = drmModeGetResources(k->fd);
@@ -241,6 +244,89 @@ static void kms_flip(const unsigned char *rgba, int sw, int sh) {
       const unsigned char *p = srow + (size_t)sx * 4;
       /* GL RGBA -> XRGB8888 little-endian (bytes B,G,R,X) */
       drow[x*4+0] = p[2]; drow[x*4+1] = p[1]; drow[x*4+2] = p[0]; drow[x*4+3] = 0xff;
+    }
+  }
+}
+
+/* ================= FALLBACK /dev/fb0 (framebuffer direto) =================
+ * Na R36S/ArkOS4Clone o port roda como usuario "ark" (uid 1002): se
+ * /dev/dri/card0 nao for escrevivel, o KMS morre e o SDL_CreateRenderer do
+ * driver offscreen SEGFAULTA nessa SDL 2.32. Sobram os fb0 - que o ES
+ * raramente usa (ele fala DRM direto). Escrita pura no mapeamento: sem
+ * GBM, sem renderD128, sem compositor. ULTRAKILL_FB_DEVICE permite apontar
+ * fb1 se existir. */
+typedef struct {
+  int fd; void *map; size_t len;
+  uint32_t w, h, pitch, bpp, roff, goff, boff, rlen, glen, blen;
+  int ready;
+} fb_out;
+static fb_out g_fb;
+
+static int fb_open(int src_w, int src_h) {
+  fb_out *f = &g_fb;
+  const char *dev = getenv("ULTRAKILL_FB_DEVICE");
+  f->fd = open((dev && *dev) ? dev : "/dev/fb0", O_RDWR | O_CLOEXEC);
+  if (f->fd < 0) f->fd = open("/dev/fb0", O_RDWR | O_CLOEXEC);
+  if (f->fd < 0) {
+    fprintf(stderr, "fb0: open falhou: %s\n", strerror(errno));
+    return -1;
+  }
+  struct fb_var_screeninfo var;
+  struct fb_fix_screeninfo finfo;
+  if (ioctl(f->fd, FBIOGET_VSCREENINFO, &var) || ioctl(f->fd, FBIOGET_FSCREENINFO, &finfo)) {
+    fprintf(stderr, "fb0: ioctl VS/FIS falhou: %s\n", strerror(errno));
+    return -1;
+  }
+  if (var.bits_per_pixel != 32 && var.bits_per_pixel != 16) {
+    var.bits_per_pixel = 32; var.grayscale = 0;
+    var.red.length = var.green.length = var.blue.length = 8;
+    var.red.offset = 16; var.green.offset = 8; var.blue.offset = 0;
+    var.transp.length = 0; var.transp.offset = 24;
+    if (ioctl(f->fd, FBIOPUT_VSCREENINFO, &var) ||
+        ioctl(f->fd, FBIOGET_VSCREENINFO, &var)) {
+      fprintf(stderr, "fb0: nao consegui por 32bpp: %s\n", strerror(errno));
+      return -1;
+    }
+  }
+  f->w = var.xres; f->h = var.yres; f->pitch = finfo.line_length; f->bpp = var.bits_per_pixel;
+  f->roff = var.red.offset;  f->rlen = var.red.length;
+  f->goff = var.green.offset; f->glen = var.green.length;
+  f->boff = var.blue.offset;  f->blen = var.blue.length;
+  size_t need = (size_t)f->pitch * var.yres_virtual;
+  f->len = finfo.smem_len < need ? finfo.smem_len : need;
+  f->map = mmap(0, f->len, PROT_READ | PROT_WRITE, MAP_SHARED, f->fd, 0);
+  if (f->map == MAP_FAILED) { fprintf(stderr, "fb0: mmap falhou: %s\n", strerror(errno)); return -1; }
+  f->ready = 1;
+  fprintf(stderr, "fb0: framebuffer %ux%u %ubpp pitch=%u (source %dx%d)\n",
+          f->w, f->h, f->bpp, f->pitch, src_w, src_h);
+  return 0;
+}
+
+static void fb_flip(const unsigned char *rgba, int sw, int sh) {
+  fb_out *f = &g_fb;
+  if (!f->ready || !rgba || sw <= 0 || sh <= 0) return;
+  unsigned char *base = (unsigned char *)f->map;
+  uint32_t yoff_max = 0;   /* sempre o buffer 0 */
+  for (uint32_t y = yoff_max; y < f->h; y++) {
+    uint32_t sy = (uint32_t)((uint64_t)(y - yoff_max) * sh / f->h);
+    if (sy >= (uint32_t)sh) sy = sh - 1;
+    if ((size_t)y * f->pitch + (size_t)f->w * (f->bpp / 8) > f->len) break;
+    const unsigned char *srow = rgba + (size_t)sy * sw * 4;
+    unsigned char *drow = base + (size_t)y * f->pitch;
+    for (uint32_t x = 0; x < f->w; x++) {
+      uint32_t sx = (uint32_t)((uint64_t)x * sw / f->w); if (sx >= (uint32_t)sw) sx = sw - 1;
+      const unsigned char *p = srow + (size_t)sx * 4;
+      if (f->bpp == 32) {
+        uint32_t v = ((uint32_t)(p[0] >> (8 - (f->rlen?f->rlen:1))) << f->roff)
+                   | ((uint32_t)(p[1] >> (8 - (f->glen?f->glen:1))) << f->goff)
+                   | ((uint32_t)(p[2] >> (8 - (f->blen?f->blen:1))) << f->boff);
+        ((uint32_t *)drow)[x] = v;
+      } else {   /* 565-ish generico */
+        uint16_t v = (uint16_t)(((p[0] >> (8 - (f->rlen?f->rlen:1))) << f->roff)
+                   | ((p[1] >> (8 - (f->glen?f->glen:1))) << f->goff)
+                   | ((p[2] >> (8 - (f->blen?f->blen:1))) << f->boff));
+        ((uint16_t *)drow)[x] = v;
+      }
     }
   }
 }
@@ -363,38 +449,57 @@ shim_gl_status shim_gl_init(shim_gl_ctx *out, int w, int h, const char *title) {
   g_win.on_swap      = NULL;
   out->fake = (struct ANativeWindow*)&g_win;
 
-  /* ULTRAKILL_NO_SDL_GL: pipeline de apresentacao pbuffer->CPU->KMS.
-   * SDL_RENDERER_SOFTWARE nao toca EGL/GLX de forma alguma (dumb buffer
-   * + memcpy), entao convive com o mesa-EGL nosso sem o crash do loader. */
+  /* ULTRAKILL_NO_SDL_GL: pipeline de apresentacao pbuffer->CPU->tela.
+   * Ordem: (1) KMS dumb buffer em card0, (2) /dev/fb0, (3) SDL software
+   * renderer. (3) e ULTIMO e condicional: nessa SDL 2.32 com driver
+   * offscreen o SDL_CreateRenderer SEGFAULTA (visto no device), entao so o
+   * tentamos com backend de video real. Sem nenhum dos tres o port segue
+   * HEADLESS: a engine roda e o log diz ate onde vai - separa crash de
+   * apresentacao de crash do Unity. */
   if (no_sdl_gl) {
     if (p_eglGetProcAddress_real)
       p_glReadPixels = (PFN_glReadPixels)p_eglGetProcAddress_real("glReadPixels");
-    /* KMS direto primeiro (evita SDL_CreateRenderer que SEGFAULTa no
-     * driver offscreen dessa SDL). */
-    if (p_glReadPixels && getenv("ULTRAKILL_KMS_DIRECT")) {
-      if (kms_open(w, h) == 0) {
+    if (!p_glReadPixels) {
+      fprintf(stderr, "bridge_gl: glReadPixels indisponivel; sem readback\n");
+    } else {
+      if (getenv("ULTRAKILL_KMS_DIRECT") && kms_open(w, h) == 0) {
         out->pixel_buf = malloc((size_t)w * h * 4);
         out->kms_ready = 1;
+        fprintf(stderr, "bridge_gl: present = KMS scanout (card0)\n");
       }
-    }
-    if (p_glReadPixels && !out->kms_ready) {
-      SDL_Renderer *r = SDL_CreateRenderer(out->sdl, -1, SDL_RENDERER_SOFTWARE);
-      if (r) {
-        SDL_Texture *t = SDL_CreateTexture(r, SDL_PIXELFORMAT_ABGR8888,
-                                           SDL_TEXTUREACCESS_STREAMING, w, h);
-        if (t) {
-          out->sdl_renderer = r; out->sdl_texture = t;
-          out->pixel_buf = malloc((size_t)w * h * 4);
-          fprintf(stderr, "bridge_gl: present pipeline pronto (leia-se: havera imagem)\n");
+      if (!out->kms_ready && !getenv("ULTRAKILL_NO_FB") && fb_open(w, h) == 0) {
+        out->pixel_buf = malloc((size_t)w * h * 4);
+        out->fb_ready = 1;
+        fprintf(stderr, "bridge_gl: present = /dev/fb0\n");
+      }
+      if (!out->kms_ready && !out->fb_ready) {
+        const char *vd = getenv("SDL_VIDEODRIVER");
+        int nofb = !vd || !*vd || strcmp(vd, "offscreen") == 0 || strcmp(vd, "dummy") == 0;
+        if (nofb || getenv("ULTRAKILL_NO_SDL_RENDERER")) {
+          fprintf(stderr, "bridge_gl: SEM present (KMS e fb0 indisponiveis; o\n");
+          fprintf(stderr, "           renderer offscreen dessa SDL crasha) - HEADLESS\n");
         } else {
-          SDL_DestroyRenderer(r);
-          fprintf(stderr, "bridge_gl: SDL_CreateTexture falhou: %s\n", SDL_GetError());
+          SDL_Renderer *r = SDL_CreateRenderer(out->sdl, -1, SDL_RENDERER_SOFTWARE);
+          if (r) {
+            SDL_Texture *t = SDL_CreateTexture(r, SDL_PIXELFORMAT_ABGR8888,
+                                               SDL_TEXTUREACCESS_STREAMING, w, h);
+            if (t) {
+              out->sdl_renderer = r; out->sdl_texture = t;
+              out->pixel_buf = malloc((size_t)w * h * 4);
+              fprintf(stderr, "bridge_gl: present pipeline pronto (leia-se: havera imagem)\n");
+            } else {
+              SDL_DestroyRenderer(r);
+              fprintf(stderr, "bridge_gl: SDL_CreateTexture falhou: %s\n", SDL_GetError());
+            }
+          } else {
+            fprintf(stderr, "bridge_gl: SDL_CreateRenderer falhou: %s\n", SDL_GetError());
+          }
         }
-      } else {
-        fprintf(stderr, "bridge_gl: SDL_CreateRenderer falhou: %s\n", SDL_GetError());
       }
-    } else {
-      fprintf(stderr, "bridge_gl: glReadPixels indisponivel; so offscreen\n");
+      if (out->pixel_buf)
+        fprintf(stderr, "bridge_gl: readback %dx%d (%zu bytes)\n", w, h, (size_t)w * h * 4);
+      else
+        fprintf(stderr, "bridge_gl: AVISO: sem pixel_buf (malloc falhou?)\n");
     }
   }
 
@@ -407,6 +512,11 @@ void shim_gl_present(shim_gl_ctx *c) {
   if (c->kms_ready) {
     p_glReadPixels(0, 0, c->width, c->height, GL_RGBA, GL_UNSIGNED_BYTE, c->pixel_buf);
     kms_flip((const unsigned char *)c->pixel_buf, c->width, c->height);
+    return;
+  }
+  if (c->fb_ready) {
+    p_glReadPixels(0, 0, c->width, c->height, GL_RGBA, GL_UNSIGNED_BYTE, c->pixel_buf);
+    fb_flip((const unsigned char *)c->pixel_buf, c->width, c->height);
     return;
   }
   if (!c->sdl_renderer || !c->sdl_texture) return;

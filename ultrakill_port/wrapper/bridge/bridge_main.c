@@ -245,7 +245,15 @@ int main(int argc, char **argv, char **envp) {
 
       if (fnInit)   { fprintf(stderr, "chamando initJni(ctx)\n");
                       ((Fn_V_ctx)fnInit)(env, NULL, ctx);
-                      fprintf(stderr, "initJni voltou\n"); }
+                      fprintf(stderr, "initJni voltou\n");
+                      /* O initJni do Unity 2019.4 REGISTRA OS PROPRIOS
+                       * handlers de sinal (crash reporter dele) e ROUBA o
+                       * nosso guard - por isso o SIGSEGV do device caiu sem
+                       * imprimir nada. Rearma o guard AGORA, depois que a
+                       * engine ja instalou os dela, para termos PC/si_addr/
+                       * dladdr do crash real no log do SD. */
+                      shim_shader_install_guard();
+                      fprintf(stderr, "[guard] rearmando apos initJni: ok\n"); }
       if (fnFocus && !getenv("ULTRAKILL_SKIP_FOCUS")) {
                       fprintf(stderr, "chamando nativeFocusChanged(1)\n");
                       ((Fn_V_bool)fnFocus)(env, NULL, 1);
@@ -254,6 +262,7 @@ int main(int argc, char **argv, char **envp) {
                       fprintf(stderr, "nativeFocusChanged PULADO (ULTRAKILL_SKIP_FOCUS)\n");
       }
       if (fnResume) { fprintf(stderr, "chamando nativeResume()\n");
+                      shim_shader_install_guard();
                       ((Fn_V_noargs)fnResume)(env, NULL);
                       fprintf(stderr, "resume voltou\n"); }
 

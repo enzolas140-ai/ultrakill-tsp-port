@@ -138,11 +138,19 @@ static struct shim_native_window *current_anw(void) {
  * ========================================================================= */
 
 #define FWD(ret, name, proto, callargs, fallback)                          \
+    FWD_AS(ret, name, #name, proto, callargs, fallback)
+/* FWD_AS: mesmo FWD, mas procurando um NOME DIFERENTE no driver real.
+ * Obrigatorio para os wrappers *_real: o driver Khronos exporta
+ * "eglGetProcAddress"/"eglGetPlatformDisplay", NAO "eglGetProcAddress_real"
+ * - com o FWD simples o dlsym falhava SEMPRE, o shim devolvia NULL para
+ * toda EXT pedida e o Unity chamava ponteiro nulo (SIGSEGV visto no
+ * device logo apos nativeResume). */
+#define FWD_AS(ret, name, realsym, proto, callargs, fallback)              \
     static ret (*r_##name) proto;                                          \
     __attribute__((visibility("default")))                                 \
     ret name proto {                                                       \
       ensure_real();                                                       \
-      if (!r_##name) r_##name = (ret (*) proto) sym(#name);                \
+      if (!r_##name) r_##name = (ret (*) proto) sym(realsym);              \
       if (!r_##name) return (ret)fallback;                                 \
       return r_##name callargs;                                            \
     }
@@ -155,14 +163,37 @@ FWD(const char*, eglQueryString,
  * functions ANTES de dlsym. Se so encaminharmos ao real, o real nao conhece
  * nossos sintetizados e retorna NULL -> SDL diz "missing". Resolvemos
  * dando match das EXT que nos sintetizamos em bridge_egl_shim.c. */
-FWD(void*, eglGetProcAddress_real, (const char *name), (name), (void*)0)
+FWD_AS(void*, eglGetProcAddress_real, "eglGetProcAddress",
+       (const char *name), (name), (void*)0)
 typedef void (*PFN_eglGetProcAddress_)(const char *);
+static unsigned long g_gp_unresolved = 0;
 __attribute__((visibility("default")))
 void (*eglGetProcAddress(const char *name))(void) {
   extern void (*shim_eglGetProcAddress_dispatch(const char *))(void);
   void (*ours)(void) = shim_eglGetProcAddress_dispatch(name);
   if (ours) return ours;
-  return (void(*)(void))eglGetProcAddress_real(name);
+  void *p = eglGetProcAddress_real(name);
+  /* Fallbacks: alguns nomes pedidos (egl*EXT / gl* core) estao EXPORTADOS
+   * como simbolo nas libs glvnd/GLESv2 mas o eglGetProcAddress do driver
+   * nao os conhece. Devolver NULL aqui = Unity pula no vazio. */
+  if (!p && name) p = dlsym(RTLD_DEFAULT, name);
+  if (!p && name) {
+    static void *gh;   /* libGLESv2 real (dispatcher glvnd ou nosso stack) */
+    if (!gh) {
+      const char *gv = getenv("ULTRAKILL_REAL_LIBGLESV2");
+      gh = dlopen((gv && *gv) ? gv : "libGLESv2.so.2", RTLD_NOW | RTLD_NOLOAD);
+      if (!gh) gh = dlopen((gv && *gv) ? gv : "libGLESv2.so.2", RTLD_NOW);
+    }
+    if (gh) p = dlsym(gh, name);
+  }
+  if (!p && name) {
+    /* loga (com teto) o que nao conseguimos resolver - e exatamente ai que
+     * o Unity vai estourar, entao essa lista e o diagnostico do proximo log */
+    if (g_gp_unresolved < 40)
+      fprintf(stderr, "shim/egl: eglGetProcAddress(\"%s\") -> NULL\n", name);
+    g_gp_unresolved++;
+  }
+  return (void (*)(void))p;
 }
 FWD(EGLBoolean, eglInitialize,
     (EGLDisplay dpy, EGLint *mj, EGLint *mn), (dpy, mj, mn), EGL_FALSE)
@@ -246,8 +277,8 @@ FWD(int, eglClientWaitSync, (EGLDisplay dpy, void *sync, int flags, EGLTime t), 
 FWD(EGLBoolean, eglGetSyncAttrib, (EGLDisplay dpy, void *sync, int attr, EGLint *val), (dpy, sync, attr, val), EGL_FALSE)
 
 /* EGL 1.4 */
-FWD(EGLDisplay, eglGetPlatformDisplay_real,
-    (EGLenum plat, void *ndisp, const EGLint *att), (plat, ndisp, att), EGL_NO_DISPLAY)
+FWD_AS(EGLDisplay, eglGetPlatformDisplay_real, "eglGetPlatformDisplay",
+       (EGLenum plat, void *ndisp, const EGLint *att), (plat, ndisp, att), EGL_NO_DISPLAY)
 __attribute__((visibility("default")))
 EGLDisplay eglGetPlatformDisplay(EGLenum plat, void *ndisp, const EGLint *att) {
   ensure_real();
@@ -349,6 +380,31 @@ FWD(EGLSurface, eglCreatePixmapSurface,
 /* -------- Record: quantas trocas passaram pela shim (diagnóstico) -------- */
 static volatile unsigned long g_shim_swaps;
 
+/* Superficies PBUFFER que NOS criamos de resposta ao Unity. Elas tem que
+ * ser "imortais": se o Unity chamar eglDestroySurface numa delas antes do
+ * ultimo eglMakeCurrent, o proximo draw pega surface pendurada. */
+#define SHIM_MAX_TRACKED 16
+static void *g_tracked[SHIM_MAX_TRACKED];
+static int   g_tracked_n;
+static pthread_mutex_t g_tracked_mx = PTHREAD_MUTEX_INITIALIZER;
+static void track_surface(void *s) {
+  if (!s) return;
+  pthread_mutex_lock(&g_tracked_mx);
+  if (g_tracked_n < SHIM_MAX_TRACKED) g_tracked[g_tracked_n++] = s;
+  pthread_mutex_unlock(&g_tracked_mx);
+}
+static int is_tracked(void *s) {
+  int r = 0;
+  if (!s) return 0;
+  pthread_mutex_lock(&g_tracked_mx);
+  for (int i = 0; i < g_tracked_n; i++) if (g_tracked[i] == s) { r = 1; break; }
+  pthread_mutex_unlock(&g_tracked_mx);
+  return r;
+}
+
+#define SHIM_EGL_WIDTH  0x3057
+#define SHIM_EGL_HEIGHT 0x3056
+
 /* =========================================================================
  *  CASOS ESPECIAIS - eglCreateWindowSurface / eglDestroySurface
  * ========================================================================= */
@@ -376,8 +432,33 @@ EGLSurface eglCreateWindowSurface(EGLDisplay dpy, EGLConfig config,
     return (EGLSurface)w->egl_surface;
   }
 
-  /* Caso contrário: Unity (ou outro chamador) passou um handle nativo real
-   * - encaminha direto pro driver. */
+  /* win NAO e nosso ANW: no caminho R36S (JNI_OnLoad -> initJni, sem
+   * ANativeActivity_onCreate) o Unity nunca recebeu uma janela de verdade e
+   * chama eglCreateWindowSurface(dpy, cfg, NULL/lixo). MESA devolve
+   * EGL_NO_SURFACE com esse native window -> o GFX device do Unity fica sem
+   * surface e o crash vem no nativeResume. Entao: criamos um PBUFFER real
+   * com o CONFIG QUE O PROPRIO UNITY pediu (mesma display, compativel com o
+   * contexto dele) e devolvemos como se fosse a window surface. Pbuffer e
+   * um render target perfeitamente valido para eglMakeCurrent. */
+  {
+    struct shim_native_window *w = current_anw();
+    int pw = w && w->w > 0 ? w->w : 480;
+    int ph = w && w->h > 0 ? w->h : 270;
+    const EGLint pattr[] = { SHIM_EGL_WIDTH, pw, SHIM_EGL_HEIGHT, ph, 0x3038 /*NONE*/ };
+    EGLSurface ps = eglCreatePbufferSurface(dpy, config, pattr);
+    if (ps) {
+      track_surface(ps);
+      fprintf(stderr,
+              "shim/egl: eglCreateWindowSurface(nao-ANW %p) -> PBUFFER real %p %dx%d (config do chamador)\n",
+              (void*)win, ps, pw, ph);
+      return ps;
+    }
+    fprintf(stderr, "shim/egl: eglCreateWindowSurface(nao-ANW %p): pbuffer falhou (err=0x%x), cai na pre-criada\n",
+            (void*)win, eglGetError());
+    if (w && w->egl_surface) return (EGLSurface)w->egl_surface;
+  }
+
+  /* ultimo recurso: encaminha pro driver com o handle que veio. */
   fprintf(stderr, "shim/egl: eglCreateWindowSurface(nativo %p) -> encaminha p/ real\n",
           (void*)win);
   return real_cws(dpy, config, win, attrib_list);
@@ -391,10 +472,11 @@ EGLBoolean eglDestroySurface(EGLDisplay dpy, EGLSurface surface) {
   if (!real_ds) return EGL_FALSE;
 
   /* Protege a surface pré-criada pelo bridge_gl - sem ela o contexto
-   * atual fica inválido e o Unity crasha no próximo swap. */
+   * atual fica inválido e o Unity crasha no próximo swap. Protege tambem
+   * os pbuffers que nos mesmos criamos no lugar das window surfaces. */
   struct shim_native_window *w = current_anw();
-  if (w && surface && (void*)surface == w->egl_surface) {
-    fprintf(stderr, "shim/egl: eglDestroySurface(precrida) -> SKIP (protegida)\n");
+  if (surface && ((w && (void*)surface == w->egl_surface) || is_tracked(surface))) {
+    fprintf(stderr, "shim/egl: eglDestroySurface(nossa) -> SKIP (protegida)\n");
     return EGL_TRUE;
   }
   return real_ds(dpy, surface);
