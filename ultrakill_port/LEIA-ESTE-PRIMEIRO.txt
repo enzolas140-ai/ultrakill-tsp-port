@@ -1,6 +1,84 @@
 ULTRAKILL - O QUE MUDOU NESSA COMPILACAO (run #99 do Actions)
 ============================================================
 
+>>> CAUSA FINAL DO TRAVAMENTO (log de 04/11 09:01) - e nao e GPU, nem som, nem touch <<<
+--------------------------------------------------------------------------------
+O build #113 entrou no console e o log prova que os dois fixes anteriores
+valiam:   NoSuchMethodError em Runnable.run = SUMIDO (0 ocorrencias) e
+status=COMPLETED(4) para o UnityStreamingAssetsPack.
+
+O que sobrou e um dialogo que o proprio Unity abre e depois ESPERA um toque que
+nunca chega (por isso o 'cond wait' em libunity.so+0x2e38ac e a tela parada):
+  [BENDER_JNI][DIALOG]      setTitle=Error
+  [BENDER_JNI][DIALOG]      setMessage=Not enough storage space to install required resources.
+  ... setOnCancelListener / show() -> JNIBridge.invoke method=run -> WAIT_BEGIN
+
+A mentira esta logo antes, no STARTUP do pad:
+  [BENDER_PAD][STARTUP] splits=0 dataPack=0 dataSource=missing dataPath=(missing)
+Ou seja: o **UnityDataAssetPack** (o pack de DADOS, nao o de streaming) ainda
+estava 'missing'. O loader so declara um pack instalado se a pasta existir com
+ficheiro dentro (bender_pad_pack_path_2749 / politica real-files-only). No
+payload deste repack mobile nada cria esse pack - ele viria do split APK/Play.
+Resultado: Unity acha que precisa INSTALAR o pack de dados, compara o espaco
+necessario, o check falha e ele abre o 'Error / Not enough storage space'.
+O cartao tem 79,8 GB livres - o 'sem espaco' e falso.
+
+CORRIGIDO SEM RECOMPILAR (binario atual mesmo):
+  unity_payload/asset_packs/UnityDataAssetPack/assets/
+      bin/            <- copia real de unity_payload/assets/bin (27 arquivos, 42,5 MB)
+      catalog.json, settings.json, ULTRAKILL-pack-marker.txt
+  (a mesma forma que o loader aceita para qualquer pack, e que ja funcionou
+   para o UnityStreamingAssetsPack). Copiar o bin/ de verdade - e nao so um
+   marker - para se o Unity ler ficheiros do pack, eles existam.)
+
+Ordem de teste a partir daqui (ambas sem build):
+  1) dar Play de novo. Esperado no unity_probe.log:
+       [BENDER_PAD][STARTUP] ... dataPack=1 dataSource=extracted-pack ...
+     e o dialogo 'Error / Not enough storage space' NAO aparece mais.
+  2) se o dialogo voltar ou aparecer 'resources unavailable', por
+     BENDER_PLAYCORE_MISSING=1 no ultrakill.conf (o probe #113 ja le isso) -
+     aI o Unity nem tenta o fluxo de instalacao do Play Core.
+  3) se passar do 1o frame mas vier preto/tela parada, ai sim e GL: olhar
+     [BENDER_SDL]/[BENDER_EGL] e testar ULTRAKILL_NO_SDL_GL=1 + readback.
+
+>>> BINARIOS REV -L INSTALADOS NO CARTAO (build #113 do Actions, 04/11) <<<
+--------------------------------------------------------------------------------
+O ciclo fonte -> GitHub Actions -> SD foi fechado e virou UM comando:
+
+  python3 tools/ci_roundtrip.py --repo "C:/Users/User/Documents/port de ultrakill
+      linux/github-upload" -m "probe: mexi no X"
+
+(ele sincroniza os fontes do port para o repo, commita, faz push, espera o run,
+baja o artifact, instala os binarios no SD com backup .bak-revl e limpa o zip.
+Se o build falhar, ele mesmo chama tools/ci_log.py e mostra os erros.)
+
+Builds desta sessao:
+  #112 FALHOU - bridge_jni.c: 'j_CallNonvirtualDoubleMethodV' undeclared (a
+       vtable referenciava slot que o macro EV_NV_VA nao gerava). Corrigido.
+  #113 OK     - binarios novos instalados:
+        unity_probe.aarch64        629208 (antes 629032)  <- Runnable fix +
+                                                            START+R1 + clique B
+                                                            + BENDER_PLAYCORE_MISSING
+        gamedata/bin/ultrakill     135704 (antes 89984)   <- JNI eventos, mouse
+                                                            virtual, vtable JNI
+                                                            completa, window
+                                                            surface do SDL
+        libs/arm64/libOpenSLES.so   24136 (antes 8488)    <- bridge OpenSL->SDL2
+        libs/arm64/{libandroid,liblog,libmediandk,libz}, audio_bridge/,
+        tools/egltest              tambem atualizados
+  Backups do que estava la: *.bak-revl ao lado de cada arquivo.
+
+Marcadores que devo ver no PROXIMO log (unity_probe.log / ultrakill.log) para
+confirmar que a revisao esta de fato rodando:
+  [BENDER_JNI][JNIBRIDGE_DISPATCH][RUNNABLE_FIX] method=run decl forcado p/ java/lang/Runnable
+  [BENDER_INPUT][MOUSE_TOGGLE] hotkey=START+R1 -> ON
+  >> nativeInjectEvent = 0x... (input ATIVO via JNI)
+  >> AUDIO: libOpenSLES usada = ...novo)
+Se o RUNNABLE_FIX aparecer e mesmo assim parar em BENDER_SYNC WAIT_BEGIN
+libunity+0x2e38ac, o proximo passo ja esta pronto para testar sem build novo:
+por BENDER_PLAYCORE_MISSING=1 no ultrakill.conf (muda a resposta do
+playCoreApiMissing e tira o fluxo de Dialog/install-pack do caminho).
+
 >>> DIAGNOSTICO DO BOOT REAL NO TSP (ultrakill.log + unity_probe.log de 04/11 08:19) <<<
 --------------------------------------------------------------------------------
 O port RODU no console (o entrypoint funcionou, o launcher funcionou) e o

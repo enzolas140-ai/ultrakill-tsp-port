@@ -482,6 +482,11 @@ static int bender_sigsuspend(const BionicSigSet64 *set){sigset_t hs;if(!set){err
  * A stable side-table maps each guest address/type to a host synchronization object.
  */
 #define BENDER_SYNC_MAX 8192
+/* ==== ULTRAKILL fix -L: dialog Android nao pode travar o jogo ==== */
+static void *bender_jni_proxy_dispatch(void*proxy,const char*method_name,void*arg0);
+static void *g_dlg_listener[6];
+static int   g_dlg_listener_n=0;
+static unsigned long g_dlg_autodismiss_count=0;
 #define BENDER_SYNC_MUTEX 1
 #define BENDER_SYNC_COND 2
 #define BENDER_SYNC_RWLOCK 3
@@ -2799,6 +2804,40 @@ if(m&&strcmp(name,"findLibrary")==0){
     logmsg("[BENDER_JNI][FIND_LIBRARY] name=%s -> NULL (nao encontrado)\n",lib?lib:"(null)"); return NULL;
 }
 if(m&&(!strcmp(name,"setTitle")||!strcmp(name,"setMessage"))){const char*s=jni_obj_string(arg0);logmsg("[BENDER_JNI][DIALOG] %s=%s\n",name,s?s:"(non-string/null)");return obj?obj:new_obj(4,ret,NULL);}
+/* ULTRAKILL fix -L: o repack mobile abre AlertDialog ("Error / Not enough
+ * storage space to install required resources.") e o libunity FICA esperando o
+ * callback do listener. Sem tela Android esse toque nunca chega -> a thread de
+ * render dorme em pthread_cond_wait para sempre (log: show() ->
+ * BENDER_UI_THREAD RETURN -> BENDER_SYNC WAIT_BEGIN libunity.so+0x2e38ac).
+ * Entao capturamos os listeners que o Builder registrar e, no show(),
+ * disparamos onClick/onCancel nos proxies guardados: o Unity recebe a
+ * resposta do dialog e segue. BENDER_DIALOG_AUTODISMIS=0 desliga. */
+if(m&&obj&&bender_jni_class_name(obj)&&!strcmp(bender_jni_class_name(obj),"android/app/AlertDialog$Builder")){
+    const char*ad=getenv("BENDER_DIALOG_AUTODISMIS");int ad_on=(!ad||!*ad||strcmp(ad,"0"));
+    if(!strncmp(name,"setOn",5)&&arg0){
+        if(g_dlg_listener_n<6)g_dlg_listener[g_dlg_listener_n++]=arg0;
+        logmsg("[BENDER_JNI][DIALOG] %s capturado proxy=%p (auto-dismiss=%d)\n",name,arg0,ad_on);
+        return obj?obj:new_obj(4,ret,NULL);
+    }
+    if(!strcmp(name,"show")){
+        BObj*dlg=new_obj(4,"android/app/AlertDialog",NULL);
+        logmsg("[BENDER_JNI][DIALOG] show() -> auto-dismiss de %d listener(s)=%d\n",g_dlg_listener_n,ad_on);
+        if(ad_on&&g_dlg_listener_n){
+            int n=g_dlg_listener_n; g_dlg_listener_n=0;
+            ++g_dlg_autodismiss_count;
+            for(int q=0;q<n;q++){
+                void*lp=g_dlg_listener[q]; g_dlg_listener[q]=NULL;
+                if(!lp)continue;
+                logmsg("[BENDER_JNI][DIALOG] disparando onClick proxy=%p dialog=%p\n",lp,(void*)dlg);
+                bender_jni_proxy_dispatch(lp,"onClick",dlg);
+                logmsg("[BENDER_JNI][DIALOG] disparando onCancel proxy=%p\n",lp);
+                bender_jni_proxy_dispatch(lp,"onCancel",dlg);
+            }
+        }
+        return dlg;
+    }
+    if(!strcmp(name,"dismiss")||!strcmp(name,"cancel")){ g_dlg_listener_n=0; return NULL; }
+}
 if(m&&strcmp(name,"getDefault")==0&&ret&&strcmp(ret,"Ljava/util/Locale;")==0){
     char l[16],c[16],tag[40],legacy[40];bender_locale_values_2749(l,sizeof(l),c,sizeof(c),tag,sizeof(tag),legacy,sizeof(legacy));
     BObj*loc=new_obj(4,"java/util/Locale",tag);

@@ -1233,6 +1233,11 @@ if [ -f "$PROBE" ] && [ -f "$PLIB/libunity.so" ] && [ "$ULTRAKILL_LOADER" != "br
   # (NoSuchMethodError em java.lang.Runnable.run + cond wait libunity+0x2e38ac).
   # O padrao fica 0 (comportamento historico); ligue para testar o caminho B.
   export BENDER_PLAYCORE_MISSING="${BENDER_PLAYCORE_MISSING:-0}"
+  # Dialog auto-fechado: o repack mobile abre AlertDialog ('Error / Not enough
+  # storage space to install required resources') e o libunity espera o toque.
+  # Sem tela Android isso nunca chega -> cond wait eterno no 1o frame. O probe
+  # agora dispara onClick/onCancel nos listeners capturados no show().
+  export BENDER_DIALOG_AUTODISMIS="${BENDER_DIALOG_AUTODISMIS:-1}"
   echo ">> BENDER WATCHDOG: idle=${BENDER_RENDER_IDLE_WATCHDOG_SEC}s absolute=${BENDER_RENDER_ABSOLUTE_WATCHDOG_SEC}s extend=${BENDER_RENDER_EXTEND_SEC}s"
   # Pula os videos de abertura (FMV). ANTES era 1 por padrao, mas o boot do
   # ULTRAKILL esta morrendo com NullReferenceException em 'main start' e o
