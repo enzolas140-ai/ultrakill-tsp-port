@@ -1303,6 +1303,18 @@ if [ -f "$PROBE" ] && [ -f "$PLIB/libunity.so" ] && [ "$ULTRAKILL_LOADER" != "br
   export BENDER_UK_WINDOW_H="${BENDER_UK_WINDOW_H:-$ULTRAKILL_INTERNAL_H}"
   export ULTRAKILL_FB_DEVICE="${ULTRAKILL_FB_DEVICE:-/dev/fb0}"
   echo ">> PRESENT fb: BENDER_UK_FB=$BENDER_UK_FB dev=$ULTRAKILL_FB_DEVICE surface=${BENDER_UK_WINDOW_W}x${BENDER_UK_WINDOW_H}"
+  # ULTRAKILL fix -N: o jogo ja RODA (log de 05/11: audio, ES, GL, e ele
+  # REESCREVE as proprias preferencias na saida). O auditor pegou isso: o
+  # frameRateLimit do ULTRAKILL tinha ido de 60 para 7. Se naoforcarmos o valor
+  # a cada boot, o limite baixo do jogo manda no FPS e o alvo de 30 nunca chega.
+  # sed (e nao python3) porque o python do device nao e garantido.
+  if [ "${ULTRAKILL_ENFORCE_FPS_PREF:-1}" != 0 ]; then
+    for pf in "$PORTDIR/data/files/Preferences/LocalPrefs.json" "$PORTDIR/data/files/Preferences/Prefs.json"; do
+      [ -f "$pf" ] || continue
+      sed -i "s/\"frameRateLimit\"[[:space:]]*:[[:space:]]*[0-9.]*/\"frameRateLimit\": ${ULTRAKILL_TARGET_FPS:-30}/g" "$pf" 2>/dev/null || true
+    done
+    echo "   frameRateLimit forcado para ${ULTRAKILL_TARGET_FPS:-30} nas prefs do jogo (ULTRAKILL_ENFORCE_FPS_PREF=0 desliga)"
+  fi
   echo ">> BENDER WATCHDOG: idle=${BENDER_RENDER_IDLE_WATCHDOG_SEC}s absolute=${BENDER_RENDER_ABSOLUTE_WATCHDOG_SEC}s extend=${BENDER_RENDER_EXTEND_SEC}s"
   # Pula os videos de abertura (FMV). ANTES era 1 por padrao, mas o boot do
   # ULTRAKILL esta morrendo com NullReferenceException em 'main start' e o

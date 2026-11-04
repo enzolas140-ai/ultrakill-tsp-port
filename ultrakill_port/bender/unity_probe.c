@@ -6095,6 +6095,59 @@ static void uk_fb_blit(const unsigned char *rgba, int sw, int sh) {
     }
 }
 
+/* ULTRAKILL fix -O: o log de 05/11 07:33 foi cirurgico:
+ *   [BENDER_UK_PRESENT] backend=fb0 1280x720 bpp=32 pitch=5120  <- fb0 ABRIU e PINTOU
+ *   [BENDER_UK_PRESENT] frame=1..5 readback=640x360 bytes_iguais_zero=921600/921600
+ *   [BENDER_EGL][SWAP_INTERVAL] error=The specified window has not been made current
+ * ou seja: lemos o framebuffer 0 e ele esta VAZIO, porque (a) o Unity desenha no
+ * FBO dele (a copia FBO->backbuffer so acontece no swap, e guest_swaps=0 para
+ * sempre) e (b) nesta thread pode nem haver contexto corrente.
+ * Estes helpers resolvem os dois: garantem contexto SOb se (e somente se) nao ha
+ * nenhum, para nao roubar o contexto do GfxDevice thread do Unity, e descobrem
+ * qual FBO tem conteudo de verdade, usando-o como fonte dos frames seguintes. */
+typedef void  (*UkGetIntegerVFn)(unsigned, int *);
+typedef void  (*UkBindFramebufferFn)(unsigned, unsigned);
+typedef const unsigned char *(*UkGetStringFn)(unsigned);
+static UkGetIntegerVFn    g_uk_get_integerv;
+static UkBindFramebufferFn g_uk_bind_fbo;
+static UkGetStringFn      g_uk_get_string;
+static unsigned g_uk_src_fbo;      /* 0 = framebuffer padrao */
+static int      g_uk_probe_left = 6;   /* tentativas de descoberta de FBO */
+static int      g_uk_ctx_announced;
+#define UK_GL_READ_FRAMEBUFFER   0x8CA8u
+#define UK_GL_FRAMEBUFFER_BINDING 0x8CA6u
+#define UK_GL_VERSION            0x1F02u
+static void uk_gl_syms(void){
+    if(!g_uk_get_integerv)  g_uk_get_integerv  = (UkGetIntegerVFn)uk_gl_addr("glGetIntegerv");
+    if(!g_uk_bind_fbo)      g_uk_bind_fbo      = (UkBindFramebufferFn)uk_gl_addr("glBindFramebuffer");
+    if(!g_uk_get_string)    g_uk_get_string    = (UkGetStringFn)uk_gl_addr("glGetString");
+}
+/* Varredura esbocada: 1 byte a cada 997. Barato e suficiente para 'tem imagem'. */
+static int uk_buf_has_content(const unsigned char *b, size_t n){
+    size_t k;
+    for(k = 0; k < n; k += 997u) if(b[k]) return 1;
+    return 0;
+}
+static void uk_ensure_current(void){
+    int none;
+    uk_gl_syms();
+    none = g_uk_get_string && g_uk_get_string(UK_GL_VERSION) == NULL;
+    if(!none) return;
+    /* Tenta em toda chamada (barato): se so logarmos/tentarmos uma vez e o
+     * primeiro MakeCurrent falhar, ficamos cegos para o resto da sessao. */
+    if(g_sdl_GL_MakeCurrent && g_bender_sdl_window && g_bender_sdl_gl){
+        int rc = g_sdl_GL_MakeCurrent(g_bender_sdl_window, g_bender_sdl_gl);
+        if(!g_uk_ctx_announced){
+            g_uk_ctx_announced = 1;
+            uk_log("[BENDER_UK_PRESENT] sem contexto corrente nesta thread; SDL_GL_MakeCurrent rc=%d error=%s\n",
+                   rc, g_sdl_GetError ? g_sdl_GetError() : "?");
+        }
+    } else if(!g_uk_ctx_announced){
+        g_uk_ctx_announced = 1;
+        uk_log("[BENDER_UK_PRESENT] sem contexto corrente e sem SDL_GL_MakeCurrent disponivel\n");
+    }
+}
+
 static void uk_present_init(int w, int h) {
     const char *off = getenv("BENDER_UK_PRESENT");
     if (off && !strcmp(off, "off")) {
@@ -6110,6 +6163,7 @@ static void uk_present_init(int w, int h) {
 
 static void uk_present(int w, int h) {
     size_t total, k, nz = 0;
+    int saved = 0;
     if (g_uk_off || !g_uk_buf || !g_uk_fbmap || w <= 0 || h <= 0) return;
     if (!g_uk_read) {
         g_uk_read = (UkReadPixelsFn)uk_gl_addr("glReadPixels");
@@ -6119,14 +6173,50 @@ static void uk_present(int w, int h) {
             return;
         }
     }
+    uk_ensure_current();
+    uk_gl_syms();
+    if (g_uk_bind_fbo && g_uk_get_integerv)
+        g_uk_get_integerv(UK_GL_FRAMEBUFFER_BINDING, &saved);
+    total = (size_t)w * (size_t)h * 4u;
+
+    /* 1) fonte conhecida (FBO descoberto ou o padrao) */
+    if (g_uk_bind_fbo) g_uk_bind_fbo(UK_GL_READ_FRAMEBUFFER, g_uk_src_fbo);
     g_uk_read(0, 0, w, h, 0x1908 /*GL_RGBA*/, 0x1401 /*GL_UNSIGNED_BYTE*/, g_uk_buf);
+    if (uk_buf_has_content(g_uk_buf, total)) goto present;
+
+    /* 2) vazio: procure um FBO que tenha imagem (o backbuffer do Unity). So nos
+     * primeiros frames e poucas tentativas, para nao pesar em 30 FPS. */
+    if (g_uk_probe_left > 0 && g_uk_bind_fbo) {
+        unsigned id;
+        g_uk_probe_left--;
+        for (id = 1u; id <= 64u; id++) {
+            g_uk_bind_fbo(UK_GL_READ_FRAMEBUFFER, id);
+            g_uk_read(0, 0, w, h, 0x1908, 0x1401, g_uk_buf);
+            if (uk_buf_has_content(g_uk_buf, total)) {
+                g_uk_src_fbo = id;
+                uk_log("[BENDER_UK_PRESENT][FBO] fonte encontrada: GL_READ_FRAMEBUFFER=%u (%dx%d) - usando como quadro\n", id, w, h);
+                goto present;
+            }
+        }
+        g_uk_bind_fbo(UK_GL_READ_FRAMEBUFFER, g_uk_src_fbo);
+        g_uk_read(0, 0, w, h, 0x1908, 0x1401, g_uk_buf);
+        if (uk_buf_has_content(g_uk_buf, total)) goto present;
+        uk_log("[BENDER_UK_PRESENT][FBO] nenhum FBO 1..64 com conteudo; tentativas restantes=%d\n", g_uk_probe_left);
+        if (g_uk_bind_fbo) g_uk_bind_fbo(UK_GL_READ_FRAMEBUFFER, (unsigned)saved);
+        return;   /* nao bata lixo preto no painel */
+    }
+    if (g_uk_bind_fbo) g_uk_bind_fbo(UK_GL_READ_FRAMEBUFFER, (unsigned)saved);
+    return;
+
+present:
+    if (g_uk_bind_fbo) g_uk_bind_fbo(UK_GL_READ_FRAMEBUFFER, (unsigned)saved);
     uk_fb_blit(g_uk_buf, w, h);
     g_uk_present_calls++;
-    total = (size_t)w * (size_t)h * 4u;
-    for (k = 0; k < total; k++) if (g_uk_buf[k]) nz++;
-    if (g_uk_present_calls <= 5ul || g_uk_present_calls % 300ul == 0ul)
-        uk_log("[BENDER_UK_PRESENT] frame=%lu readback=%dx%d bytes_iguais_zero=%zu/%zu\n",
-               g_uk_present_calls, w, h, total - nz, total);
+    if (g_uk_present_calls <= 5ul || g_uk_present_calls % 300ul == 0ul) {
+        for (k = 0; k < total; k++) if (g_uk_buf[k]) nz++;
+        uk_log("[BENDER_UK_PRESENT] frame=%lu readback=%dx%d fbo=%u bytes_zero=%zu/%zu\n",
+               g_uk_present_calls, w, h, g_uk_src_fbo, total - nz, total);
+    }
 }
 
 /* ULTRAKILL fix -N: present por framebuffer para o caminho COM SDL.

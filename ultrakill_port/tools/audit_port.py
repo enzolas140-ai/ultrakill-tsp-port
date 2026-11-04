@@ -450,6 +450,30 @@ def check_es_handoff(root, port_parent, rep):
         rep.add('OK', 'lock de display e nao-bloqueante (flock -n)', 'nao trava esperando outro port')
 
 
+def check_probe_markers(root, rep):
+    """Os knobs novos tem que estar NO BINARIO instalado. Ja aconteceu de o cartao
+    rodar um probe antigo (instalacao parcial), entao isso e checado como
+    invariante: se o launcher exporta uma env e o probe nao a le, o tunino e
+    decorativo."""
+    p = os.path.join(root, 'unity_probe.aarch64')
+    if not os.path.isfile(p):
+        rep.add('FAIL', 'probe instalado', 'unity_probe.aarch64 ausente'); return
+    d = open(p, 'rb').read()
+    need = [b'BENDER_UK_FB', b'BENDER_UK_WINDOW_W', b'BENDER_UK_PRESENT',
+            b'BENDER_DIALOG_WAIT_RELEASE_SEC', b'BENDER_DIALOG_AUTODISMIS',
+            b'BENDER_PLAYCORE_MISSING', b'BENDER_MOUSE_TOGGLE_START_R1', b'/dev/fb0']
+    miss = [n.decode() for n in need if n not in d]
+    rep.add('OK' if not miss else 'FAIL', 'probe instalado contem os knobs do conf',
+            'todos presentes (%d bytes)' % len(d) if not miss else 'FALTAM: ' + ', '.join(miss))
+    lau = os.path.join(root, 'ultrakill_start.sh')
+    if os.path.isfile(lau):
+        s = open(lau, encoding='utf-8', errors='replace').read()
+        gone = [n.decode() for n in need if n.decode().startswith(('BENDER_', 'ULTRAKILL_'))
+                and n.decode() not in s and ('export ' + n.decode()) not in s]
+        rep.add('OK' if not gone else 'WARN', 'launcher exporta os knobs que o probe le',
+                'ok' if not gone else 'sem export: ' + ', '.join(gone))
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('--root', default=os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -460,11 +484,13 @@ def main():
     print('raiz  : %s\n' % port_parent)
     rep = Rep()
     for fn in (check_required, check_elfs, check_crlf, check_conf_keys, check_python,
-               check_runtime_files, check_base_apk, check_es_handoff, check_house):
+               check_runtime_files, check_base_apk, check_es_handoff, check_probe_markers,
+               check_house):
         try:
             if fn is check_required or fn is check_crlf or fn is check_house or fn is check_es_handoff:
                 fn(root, port_parent, rep)
-            elif fn is check_conf_keys or fn is check_runtime_files or fn is check_base_apk:
+            elif fn is check_conf_keys or fn is check_runtime_files or fn is check_base_apk \
+                    or fn is check_probe_markers:
                 fn(root, rep)
             else:
                 fn(root, rep)
