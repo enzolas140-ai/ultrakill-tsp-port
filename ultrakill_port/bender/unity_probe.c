@@ -1054,6 +1054,20 @@ static int bender_ANativeWindow_setBuffersGeometry(BenderNativeWindow *w,int wid
 static void bender_ANativeWindow_acquire(BenderNativeWindow *w){++g_native_window_acquire_calls;if(w)++w->refs;logmsg("[BENDER_ANW] acquire call=%zu window=%p refs=%d\n",g_native_window_acquire_calls,(void*)w,w?w->refs:-1);}
 static void bender_ANativeWindow_release(BenderNativeWindow *w){++g_native_window_release_calls;if(w&&w->refs>0)--w->refs;logmsg("[BENDER_ANW] release call=%zu window=%p refs=%d\n",g_native_window_release_calls,(void*)w,w?w->refs:-1);}
 static BenderNativeWindow *bender_ANativeWindow_fromSurface(void *env, void *surface){
+        /* ULTRAKILL fix -N: o default do nosso ANativeWindow fake e 640x480 (4:3),
+         * mas o painel e 1280x720 (16:9). Alem do readback sair esticado, o budget
+         * de 30 FPS foi calculado para 640x360. BENDER_UK_WINDOW_W/H ajustam isto
+         * antes de o Unity criar a surface. */
+        { static int geo_applied=0;
+          if(!geo_applied){ geo_applied=1;
+            const char*ew=getenv("BENDER_UK_WINDOW_W"),*eh=getenv("BENDER_UK_WINDOW_H");
+            if(ew&&*ew&&eh&&*eh){ int a=atoi(ew),b=atoi(eh);
+                if(a>16&&b>16){ g_native_window.width=a; g_native_window.height=b;
+                    logmsg("[BENDER_ANW][GEOMETRY] window forcada para %dx%d (BENDER_UK_WINDOW_W/H)\n",a,b);
+                }
+            }
+          }
+        }
     (void)env;++g_native_window_from_surface_calls;
     BenderNativeWindow*w=(surface&&surface==g_bender_fix78_last_surface&&g_bender_fix78_last_surface_window)?g_bender_fix78_last_surface_window:&g_native_window;
     logmsg("[BENDER_ANW] fromSurface call=%zu surface=%p -> window=%p %dx%d format=%d refs=%d source=%s\n",g_native_window_from_surface_calls,surface,(void*)w,w?w->width:0,w?w->height:0,w?w->format:0,w?w->refs:-1,(w!=&g_native_window)?"fix78-aimage-reader":"default");
@@ -4756,6 +4770,9 @@ static __attribute__((unused)) void bender_fix69_frame_pace_2869(unsigned frame,
     }
 }
 
+/* ULTRAKILL fix -N: forward decl do present por framebuffer (as funcoes uk_*
+ * estao mais abaixo no arquivo; sem isto o call site do frame loop nao as ve). */
+static void uk_fb_present_frame(int w,int h);
 static __attribute__((unused)) int bender_frame_host_present_enabled(void){
     const char *e=getenv("BENDER_FRAME_HOST_PRESENT");
     if(!e||!*e)return 1;
@@ -4767,7 +4784,14 @@ static __attribute__((unused)) int bender_host_present_fallback(unsigned frame,c
     if(g_bender_egl_swaps>0ul){if(!suppression_announced){suppression_announced=1;logmsg("[BENDER_FRAME_LOOP][HOST_PRESENT_SUPPRESSED] after_first_guest_swap=1 policy=single-present reason=avoid-double-buffer-flip\n");}return 0;}
     if(!g_bender_sdl_ready||!g_bender_egl_current||!g_sdl_GL_SwapWindow||!g_bender_sdl_window)return 0;
     g_sdl_GL_SwapWindow(g_bender_sdl_window);++g_bender_host_presents;
-    logmsg("[BENDER_FRAME_LOOP][HOST_PRESENT] frame=%u host_present=%lu guest_swaps=%lu drawable=%dx%d reason=%s policy=bootstrap-only\n",frame,g_bender_host_presents,g_bender_egl_swaps,g_bender_sdl_draw_w,g_bender_sdl_draw_h,reason?reason:"no-guest-swap");return 1;
+    logmsg("[BENDER_FRAME_LOOP][HOST_PRESENT] frame=%u host_present=%lu guest_swaps=%lu drawable=%dx%d reason=%s policy=bootstrap-only\n",frame,g_bender_host_presents,g_bender_egl_swaps,g_bender_sdl_draw_w,g_bender_sdl_draw_h,reason?reason:"no-guest-swap");
+    /* ULTRAKILL fix -N (evidencia do log de 05/11 07:17: musica tocando, 200
+     * host_present, guest_swaps=0 e o painel parado na lista da ES): o swap do
+     * SDL apresenta a surface do SDL, mas quem desenha o jogo e a surface do
+     * Unity (criada do nosso ANativeWindow fake). Entao batemos o framebuffer
+     * atual no painel nos mesmos. BENDER_UK_FB=0 desliga. */
+    uk_fb_present_frame(0,0);
+    return 1;
 }
 
 static const char *bender_sdl_error(void){return g_sdl_GetError?g_sdl_GetError():"(SDL_GetError unavailable)";}
@@ -6105,6 +6129,36 @@ static void uk_present(int w, int h) {
                g_uk_present_calls, w, h, total - nz, total);
 }
 
+/* ULTRAKILL fix -N: present por framebuffer para o caminho COM SDL.
+ * O blit para /dev/fb0 ja existia, mas so era chamado dentro de
+ * bender_eglSwapBuffers no ramo !g_bender_sdl_ready - e no TrimUI Smart Pro o
+ * SDL (driver=mali) fica pronto, entao esse ramo nunca era tomado e o jogo
+ * rodava mudo de video (audio OK, guest_swaps=0, tela parada no ultimo frame
+ * da ES). Aqui lemos o framebuffer GL ATUAL (glReadPixels, mesmo contexto que o
+ * Unity deixou corrente apos o nativeRender) e copiamos para o painel.
+ * BENDER_UK_FB=0 desliga; BENDER_UK_FB_W/H forcem o tamanho do readback.
+ * O tamanho e congelado no primeiro frame (o buffer e alocado la) e nunca
+ * excedido, senao o glReadPixels escreveria fora do heap. */
+static void uk_fb_present_frame(int w,int h){
+    const char *off=getenv("BENDER_UK_FB");
+    if(off&&(!strcmp(off,"0")||!strcmp(off,"off")))return;
+    if(g_uk_off)return;
+    int W=w>0?w:0,H=h>0?h:0;
+    const char *ew=getenv("BENDER_UK_FB_W"),*eh=getenv("BENDER_UK_FB_H");
+    if(ew&&*ew)W=atoi(ew);
+    if(eh&&*eh)H=atoi(eh);
+    if(W<=0||H<=0){
+        W=g_native_window.width>0?g_native_window.width:g_bender_sdl_draw_w;
+        H=g_native_window.height>0?g_native_window.height:g_bender_sdl_draw_h;
+    }
+    if(W<=0||H<=0)return;
+    static int iw=0,ih=0;
+    if(iw==0){ uk_present_init(W,H); iw=W; ih=H; }
+    if(W>iw)W=iw;
+    if(H>ih)H=ih;
+    uk_present(W,H);
+}
+
 static BenderEGLBoolean bender_eglSwapBuffers(BenderEGLDisplay d,BenderEGLSurface s){
     if(d==BENDER_EGL_DISPLAY_COOKIE&&s==BENDER_EGL_SURFACE_COOKIE&&g_bender_sdl_ready){unsigned long next_swap=g_bender_egl_swaps+1ul;bender_render_inspector_before_swap(next_swap);bender_render_scale_present_2768();bender_input_draw_cursor();bender_gpu_watchdog_done("eglSwapBuffers-sdl");g_sdl_GL_SwapWindow(g_bender_sdl_window);++g_bender_egl_swaps;bender_render_scale_resume_2768();if(g_bender_egl_swaps<=10||g_bender_egl_swaps%60u==0u)logmsg("[BENDER_EGL][SWAP][SDL] frame=%lu drawable=%dx%d render_scale=%s\n",g_bender_egl_swaps,g_bender_sdl_draw_w,g_bender_sdl_draw_h,g_bender_rs_active_2768?"75%":"OFF");return BENDER_EGL_TRUE;}
     typedef BenderEGLBoolean(*Fn)(BenderEGLDisplay,BenderEGLSurface);Fn f=(Fn)bender_host_egl_sym("eglSwapBuffers");
@@ -6119,6 +6173,8 @@ static BenderEGLBoolean bender_eglSwapBuffers(BenderEGLDisplay d,BenderEGLSurfac
                 int H=g_native_window.height>0?g_native_window.height:480;
                 if(g_uk_present_calls==0ul&&!g_uk_off)uk_present_init(W,H);
                 uk_present(W,H);
+                /* nota: uk_fb_present_frame e o caminho idempotente (congela o
+                 * tamanho no 1o init); usado no frame loop com SDL. */
             }
         }
         return rrc;

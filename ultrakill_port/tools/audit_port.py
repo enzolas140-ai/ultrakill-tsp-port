@@ -19,6 +19,7 @@ numa pasta montada no Windows e que depois viram "nao rodou":
   8. espaco livre no cartao (o loader do ULTRAKILL reclama de storage!)
   8b. resto de stub antigo / .bak que pode confundir
   9. consistencia entry<->gamelist<->metadata (nome do arquivo, button=)
+  10. base.apk presente E identico ao payload extraido (causa raiz do 'nao abre')
 
 Uso:  python3 tools/audit_port.py [--root <dir do port>]
 Saida: linhas FAIL/WARN/OK + resumo com contagem. Exit!=0 se houver FAIL.
@@ -194,8 +195,15 @@ def check_conf_keys(root, rep):
         m = re.match(r'([A-Za-z_][A-Za-z0-9_]*)=', line)
         if m:
             keys.append(m.group(1))
-    launcher = open(os.path.join(root, 'ultrakill_start.sh'), encoding='utf-8', errors='replace').read() \
-        if os.path.isfile(os.path.join(root, 'ultrakill_start.sh')) else ''
+    launcher_txt = ''
+    entry_txt = ''
+    if os.path.isfile(os.path.join(root, 'ultrakill_start.sh')):
+        launcher_txt = open(os.path.join(root, 'ultrakill_start.sh'), encoding='utf-8', errors='replace').read()
+    for cand in ('ULTRAKIL.sh', 'ultrakill.sh'):
+        p = os.path.join(os.path.dirname(root), cand)
+        if os.path.isfile(p):
+            entry_txt += open(p, encoding='utf-8', errors='replace').read()
+    launcher = launcher_txt + entry_txt
     blob = b''
     for b in ('unity_probe.aarch64', os.path.join('gamedata', 'bin', 'ultrakill')):
         p = os.path.join(root, b.replace('/', os.sep))
@@ -345,6 +353,103 @@ def check_runtime_files(root, rep):
                     m.group(1)[:40] if m else '(vazio)')
 
 
+def check_base_apk(root, rep):
+    """A CAUSA RAIZ do 'nao abre'. O probe diz ao libunity que o APK do jogo e
+    <app>/unity_payload/BENDER_RUNTIME_UNIFIED.apk ou <app>/base.apk, e o Unity
+    EXTRAI recursos dai ('il2cpp failed to extract resources (%s => %s)'
+    seguido de 'Not enough storage space to install required resources.'). Sem o
+    arquivo, extracao falha -> AlertDialog -> cond wait eterno. Entao isto aqui
+    e FAIL, nao aviso."""
+    unified = os.path.join(root, 'unity_payload', 'BENDER_RUNTIME_UNIFIED.apk')
+    base = os.path.join(root, 'base.apk')
+    which = unified if os.path.isfile(unified) else base
+    if not os.path.isfile(which):
+        rep.add('FAIL', 'APK que o libunity vai extrair recursos existe',
+                'FALTA %s - rode: python3 tools/install_base_apk.py --apk <ULTRADROID.apk>' % os.path.basename(which))
+        return
+    try:
+        import zipfile
+        z = zipfile.ZipFile(which)
+        ent = {i.filename: i.file_size for i in z.infolist()}
+    except Exception as e:
+        rep.add('FAIL', 'APK e um zip legivel', repr(e)[:120])
+        return
+    rep.add('OK', 'APK de extracao: %s' % os.path.basename(which),
+            '%.0f MB, %d entradas' % (os.path.getsize(which) / 2**20, len(ent)))
+    # as libs que o payload usa tem que vir do MESMO apk, senao 'Referenced script is missing'
+    import hashlib
+    pairs = [('lib/arm64-v8a/libunity.so', 'unity_payload/lib/arm64-v8a/libunity.so'),
+             ('lib/arm64-v8a/libil2cpp.so', 'unity_payload/lib/arm64-v8a/libil2cpp.so'),
+             ('assets/bin/Data/Managed/Metadata/global-metadata.dat',
+              'unity_payload/assets/bin/Data/Managed/Metadata/global-metadata.dat')]
+    dif = []
+    for key, rel in pairs:
+        card = os.path.join(root, rel.replace('/', os.sep))
+        if key not in ent or not os.path.isfile(card):
+            dif.append(rel + ' (faltando de um dos lados)')
+            continue
+        if ent[key] != os.path.getsize(card):
+            dif.append('%s (tamanho %d vs %d)' % (rel, ent[key], os.path.getsize(card)))
+            continue
+        ha = hashlib.md5(z.read(key)).hexdigest()
+        hb = hashlib.md5(open(card, 'rb').read()).hexdigest()
+        if ha != hb:
+            dif.append(rel + ' (CONTEUDO difere)')
+    rep.add('OK' if not dif else 'FAIL', 'payload extraido e do MESMO apk (libunity/libil2cpp/metadata)',
+            'identico' if not dif else ' -> '.join(dif))
+    # assets/ cobertos
+    miss = [k for k in ent if k.startswith('assets/') and not k.endswith('/')
+            and k != 'assets/bin/Data/boot.config'
+            and not os.path.exists(os.path.join(root, 'unity_payload', 'assets', k[len('assets/'):].replace('/', os.sep)))]
+    rep.add('OK' if not miss else 'WARN', 'todo assets/ do apk esta no payload',
+            '%d faltando: %s' % (len(miss), ', '.join(sorted(miss)[:3])) if miss else 'completo')
+
+
+def check_es_handoff(root, port_parent, rep):
+    """Classe de erro 'travou na lista de jogos': o port mexe no display/console e
+    nao devolve, ou bloqueia antes de escrever log. Checado por invariante de
+    codigo, porque este bug NAO aparece em log nenhum (a ES e a vitima)."""
+    lau = os.path.join(root, 'ultrakill_start.sh')
+    ent = os.path.join(port_parent, 'ULTRAKIL.sh')
+    if not os.path.isfile(lau):
+        rep.add('WARN', 'launcher para checar handoff de ES', 'ausente'); return
+    src = open(lau, encoding='utf-8', errors='replace').read()
+    unbind = re.search(r'echo\s+0\s*>\s*/sys/class/vtconsole', src)
+    guarded = 'ULTRAKILL_DISPLAY_TAKEOVER' in src
+    rep.add('OK' if (unbind is None or guarded) else 'FAIL',
+            'unbind de vtcon so acontece protegido por knob',
+            'opt-in via ULTRAKILL_DISPLAY_TAKEOVER' if guarded else
+            'echo 0 > vtcon/bind SEM guarda: deixa a ES congelada ate reboot')
+    # o cleanup tem que devolver o console, nao so o devfreq
+    m = re.search(r'uk_cleanup\(\)\s*\{(.{0,4000}?)\n  \}', src, re.S)
+    body = m.group(1) if m else ''
+    rep.add('OK' if ('vtconsole' in body and 'echo 1' in body) else 'FAIL',
+            'uk_cleanup restaura o vtcon', 'ok' if 'vtconsole' in body else 'FALTA: restaurar bind=1 na saida')
+    rep.add('OK' if 'trap uk_cleanup' in src else 'FAIL', 'trap de limpeza registrado', '')
+    if os.path.isfile(ent):
+        e = open(ent, encoding='utf-8', errors='replace').read()
+        rep.add('OK' if 'entry.log' in e else 'WARN',
+                'entry tem log proprio (prova antes do launcher)', 'entry.log' if 'entry.log' in e else 'sem log no entry')
+        rep.add('OK' if 'vtconsole' in e else 'WARN',
+                'entry faz self-heal do console ao acionar o port',
+                'ok' if 'vtconsole' in e else 'sem self-heal')
+        rep.add('OK' if re.search(r'timeout[^\n]*"?\$BINSH|timeout -k', e) else 'WARN',
+                'entry capa o launcher com timeout duro', 'ok' if re.search(r'timeout -k', e) else 'sem teto')
+        # /dev/tty0 so com opt-in
+        i = e.find('/dev/tty0')
+        ok = (i < 0) or ('ULTRAKILL_TTY_FEEDBACK' in e) or ('UK_TTY_OK' in e)
+        rep.add('OK' if ok else 'WARN', 'escrita em /dev/tty0 e opt-in', 'ok' if ok else 'tty0 sem guarda')
+        for name in ('ULTRAKIL.sh',):
+            d = open(os.path.join(port_parent, name), 'rb').read()
+            rep.add('OK' if b'\r\n' not in d else 'FAIL', 'CRLF em %s' % name, 'LF ok' if b'\r\n' not in d else 'tem CRLF')
+        if os.path.isfile(os.path.join(root, 'SAFE')):
+            rep.add('WARN', 'MODO SEGURO ativo (ultrakill/SAFE existe)', 'sem takeover, teto 90s')
+    # lock obsoleto de display pode travar um port que usa flock -n=nao, mas o
+    # processo antigo ainda de pe deixa o lock em /tmp: avisamos.
+    if re.search(r'flock -n 8', src):
+        rep.add('OK', 'lock de display e nao-bloqueante (flock -n)', 'nao trava esperando outro port')
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('--root', default=os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -355,11 +460,11 @@ def main():
     print('raiz  : %s\n' % port_parent)
     rep = Rep()
     for fn in (check_required, check_elfs, check_crlf, check_conf_keys, check_python,
-               check_runtime_files, check_house):
+               check_runtime_files, check_base_apk, check_es_handoff, check_house):
         try:
-            if fn is check_required or fn is check_crlf or fn is check_house:
+            if fn is check_required or fn is check_crlf or fn is check_house or fn is check_es_handoff:
                 fn(root, port_parent, rep)
-            elif fn is check_conf_keys or fn is check_runtime_files:
+            elif fn is check_conf_keys or fn is check_runtime_files or fn is check_base_apk:
                 fn(root, rep)
             else:
                 fn(root, rep)

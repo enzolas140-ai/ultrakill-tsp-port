@@ -684,3 +684,98 @@ PROXIMO TESTE (esperado AGORA dar imagem/menu):
 
 AVISO PRATICO: se der tela preta de novo, NAO precisa reiniciar o console - o
 launcher tem teto BENDER_MAX_SEC=300s e devolve ao menu do ES sozinho em ~5min.
+
+=======================================================================
+11) CAUSA RAIZ DO 'NAO ABRE' - FALTAVA O base.apk (04/11, resolvido)
+=======================================================================
+O dialogo 'Error / Not enough storage space to install required resources.' NAO
+era sobre espaco no cartao (79,8 GB livres) e NAO era Play Asset Pack. A prova
+saiu do proprio libunity.so: as strings vizinhas aquela mensagem sao
+
+    assets/bin/  Failed to load Il2CPP.  /il2cpp  unity.ver
+    il2cpp failed to extract resources (%s => %s)
+    Not enough storage space to install required resources.
+
+ou seja: e o caminho de EXTRACAO DE RECURSOS, e a extracao era feita contra o
+arquivo que o loader informa como APK do jogo. Em bender/unity_probe.c:
+
+    <app>/unity_payload/BENDER_RUNTIME_UNIFIED.apk   (se existir)
+    <app>/base.apk                                   (senao)
+
+E o port NAO TINHA base.apk. Extracao falhava -> Unity abria AlertDialog e
+adormecia em pthread_cond_wait (libunity.so+0x2e38ac) esperando um toque que
+nao existe sem tela Android. O watchdog de 90s matava o processo (exit 143),
+voltava ao ES e parecia 'o port nem abriu'.
+
+O QUE FOI FEITO
+ - instalado base.apk (501 MB) = o ULTRADROID.apk de
+   'C:\Users\User\Documents\port de ultrakill linux\ultrakill_port\ULTRADROID.apk'.
+   NAO use o outro ULTRADROID.apk (943 MB, raiz de Documents): ele e de OUTRA
+   versao (libunity 23.337.616 vs 18.623.792 do cartao) e daria
+   'Referenced script is missing'.
+ - verificado CONTEUDO (md5), nao so tamanho: libunity.so, libil2cpp.so,
+   libmain.so, global-metadata.dat, data.unity3d, aa/catalog.json,
+   aa/settings.json = TODOS identicos ao payload extraido. As 5 libs do APK
+   (inclusive libAPKVISION.so e libstub.so do repack) ja estavam no cartao.
+ - novo tool:  python3 tools/install_base_apk.py --apk <arquivo>
+   (copia, verifica e puxa o que faltar).  --only-verify so confere.
+ - auditor agora trata isso como FAIL (era o erro que ninguem via):
+   python3 tools/audit_port.py
+ - preflight do launcher passou a aceitar base.apk como fonte de extracao e
+   nao vai extrair de novo se unity_payload/assets/aa/Android ja existe.
+ - o libertar-do-wait-por-tempo (BENDER_DIALOG_WAIT_RELEASE_SEC=3, build #118)
+   continua ligado como rede de seguranca: agora nao deve ser mais necessario.
+
+COMO CONFIRMAR QUE PASSOU
+No ultrakill/unity_probe.log o dialogo nao deve aparecer mais. Se aparecer,
+leia a linha ANTES dele: ainda assim o wait libera em ~3s e o log deve mostrar
+as primeiras linhas [BENDER_SDL]/[BENDER_EGL] (criacao de janela/GPU), que em
+nenhum log anterior existiram. O ultrakill.log agora imprime o RESUMO DO BOOT
+tambem no ramo do BENDER (inclusive contagens dialog/wait/sdl/egl).
+
+=======================================================================
+12) 'TRAVOU NA LISTA DE JOGOS' - era o NOSSO port congelando a ES (04/11 20:0x)
+=======================================================================
+Sintoma novo, classe nova: ao acionar o port a ES parava de repintar na lista e
+NAO havia log novo (o mais recente era 19:24). Prova de que o estrago nao era
+do jogo: o launcher nunca chegou a comecar.
+
+CAUSA (no launcher, secao 'trava do display'): ele fazia
+
+    echo 0 > /sys/class/vtconsole/vtcon0/bind
+    echo 0 > /sys/class/vtconsole/vtcon1/bind
+
+(receita copiada do Cuphead/GTA SA, para a ES nao pintar por cima do jogo) e o
+uk_cleanup restaurava SOMENTE o devfreq - o console ficava DESLIGADO ate reboot.
+Como este port morre por timeout (SIGTERM) e cada teste refaz isso, a UI da ES
+permanecia muda: 'travou na lista de jogos'.
+
+CORRIGIDO (fix -M):
+ - unbind agora e OPT-IN: ULTRAKILL_DISPLAY_TAKEOVER=0 por omissao no
+   ultrakill.conf (liga 1 so se a ES estiver desenhando por cima do jogo);
+ - uk_cleanup devolve vtcon0/1 para 1 em QUALQUER saida (trap EXIT/TERM/INT/HUP),
+   e restaura o valor original quando ele foi registrado;
+ - SELF-HEAL no entry ULTRAKIL.sh: ao acionar o port, qualquer vtcon encontrado
+   em 0 e religado ANTES de qualquer outra coisa. Ou seja, depois de um reboot,
+   um unico acionamento do ULTRAKILL ja repara a situacao deixada pelas versoes
+   antigas (e nao volta a quebrar);
+ - entry NAO escreve mais em /dev/tty0 por omissao (limpar o console da ES era
+   outro jeito de congelar a tela). Ligue com ULTRAKILL_TTY_FEEDBACK=1 ou com o
+   ficheiro ULTRAKILL-TTY na raiz de ports/;
+ - chamadas de sistema do entry rodam com stdin fechado (evita sudo/get_controls
+   pedindo interacao e bloqueando o entry inteiro, sem log nenhum);
+ - o entry capa o launcher com timeout -k (330s; 90s no MODO SEGURO), entao a ES
+   SEMPRE recupera o controle, mesmo se o launcher travar numa espera.
+
+RECUPERACAO SEM REBOOT (util se travar de novo):
+ 1. crie um ficheiro vazio chamado SAFE dentro de ultrakill/ (do PC, ou no proprio
+    console). Ele desliga takeover/tty e deixa o teto em 90s.
+ 2. acione o port uma vez: o self-heal religa o console e sai sozinho.
+ 3. apague o SAFE quando quiser voltar ao comportamento normal.
+
+PROVA NO CODIGO (auditor): python3 tools/audit_port.py checa como invariante que
+ - 'echo 0 > vtcon/bind' so existe protegido por ULTRAKILL_DISPLAY_TAKEOVER,
+ - uk_cleanup contem a restauracao do vtcon,
+ - o entry tem log proprio (ultrakill/entry.log), self-heal, teto de timeout e
+   escrita em /dev/tty0 opt-in.
+Este checker existe porque esse bug NUNCA aparece em log: a vitima e a ES.

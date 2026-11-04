@@ -145,6 +145,12 @@ else
   DEF_INT_W=480; DEF_INT_H=360
 fi
 echo ">> CONSOLE detectado: BOX=$BOX GPU=$GPU painel=${PANEL:-?} ($PANEL_W${PANEL_H:+x}$PANEL_H) -> interno default ${DEF_INT_W}x${DEF_INT_H}"
+# ULTRAKILL fix -N: estes dois NUNCA foram exportados (o RESUMO do boot mostrava
+# 'resolucao_interna=?x?'), e o probe ficava com o default 4:3 640x480 do
+# ANativeWindow fake enquanto o painel e 16:9. Agora o tamanho interno definido
+# aqui e o tamanho real da surface do Unity e do readback.
+export ULTRAKILL_INTERNAL_W="${ULTRAKILL_INTERNAL_W:-$DEF_INT_W}"
+export ULTRAKILL_INTERNAL_H="${ULTRAKILL_INTERNAL_H:-$DEF_INT_H}"
 # Permite forcar no conf (ULTRAKILL_BOX=tsp|r36s) se a deteccao errar.
 if [ -n "${ULTRAKILL_BOX:-}" ]; then
   BOX="$ULTRAKILL_BOX"
@@ -250,6 +256,32 @@ if [ "$SPRUCE" = 1 ]; then
     exec 8>/tmp/ports-android-display.lock
     flock -n 8 || echo "   AVISO: outra janela de port segura o display (lock ocupado)"
   fi
+  # ULTRAKILL fix -M (TRAVAMENTO NA LISTA DE JOGOS, relato de 04/11 20:0x):
+  # 'echo 0 > /sys/class/vtconsole/vtconN/bind' desliga o console do framebuffer
+  # e NINGUEM devolvia - o uk_cleanup so restaurava devfreq. Como este port morre
+  # por timeout (SIGTERM) e refazemos isso a cada teste, o console ficava
+  # desligado ate ao reboot: a ES para de repintar e parece que 'travou na lista
+  # de jogos' (e por isso nem log novo foi escrito). Agora:
+  #   (1) o unbind e OPT-IN (ULTRAKILL_DISPLAY_TAKEOVER=1) - nao da beneficio
+  #       nenhum aqui, porque o jogo nunca chegou a desenhar uma frame; o ES
+  #       continua no controle do painel;
+  #   (2) se alguem ligar, o uk_cleanup devolve o valor original;
+  #   (3) self-heal: se encontrarmos um vtcon em 0 (estrago de versao antiga),
+  #       ligamos de volta no boot, para a ES voltar a repintar.
+  UK_VT_RESTORE="/tmp/ultrakill-vt-$$"
+  : > "$UK_VT_RESTORE" 2>/dev/null
+  for vt in /sys/class/vtconsole/vtcon0/bind /sys/class/vtconsole/vtcon1/bind; do
+    [ -e "$vt" ] || continue
+    NOW=$(cat "$vt" 2>/dev/null)
+    if [ "${ULTRAKILL_DISPLAY_TAKEOVER:-0}" = 1 ] && [ -w "$vt" ]; then
+      [ -n "$NOW" ] && echo "$vt $NOW" >> "$UK_VT_RESTORE" 2>/dev/null
+      echo 0 > "$vt" 2>/dev/null
+    elif [ "${NOW:-1}" = 0 ]; then
+      if echo 1 > "$vt" 2>/dev/null; then
+        echo "   vtcon SELF-HEAL: $vt estava 0 (console desligado por run antigo); religado"
+      fi
+    fi
+  done
   # UK_DEVFREQ_RESTORE e o lock tem que ser desfeitos em QUALQUER saida (o
   # Cuphead faz igual no finish/trap EXIT): sem isto, um exit antecipado
   # (ex.: sem binario) deixava o SoC com min_freq no teto para a ES toda.
@@ -257,6 +289,17 @@ if [ "$SPRUCE" = 1 ]; then
   uk_cleanup() {
     [ "${uk_cleanup_done:-0}" = 1 ] && return 0
     uk_cleanup_done=1
+    # devolve o console do framebuffer SEMPRE (nao so se registrou valor):
+    # deixar vtcon em 0 e exatamente o que congela a UI da ES ate ao reboot.
+    for v in /sys/class/vtconsole/vtcon0/bind /sys/class/vtconsole/vtcon1/bind; do
+      [ -w "$v" ] && echo 1 > "$v" 2>/dev/null
+    done
+    if [ -f "${UK_VT_RESTORE:-/nonexistent}" ]; then
+      while read -r vpath vold; do
+        [ -n "$vpath" ] && [ -n "$vold" ] && echo "$vold" > "$vpath" 2>/dev/null
+      done < "$UK_VT_RESTORE"
+      rm -f "$UK_VT_RESTORE" 2>/dev/null || true
+    fi
     if [ -n "${UK_DEVFREQ_RESTORE:-}" ] && [ -f "$UK_DEVFREQ_RESTORE" ]; then
       while read -r upath uold; do
         [ -n "$upath" ] && [ -n "$uold" ] && echo "$uold" > "$upath" 2>/dev/null
@@ -265,9 +308,6 @@ if [ "$SPRUCE" = 1 ]; then
     fi
   }
   trap uk_cleanup EXIT TERM INT HUP
-  for vt in /sys/class/vtconsole/vtcon0/bind /sys/class/vtconsole/vtcon1/bind; do
-    [ -w "$vt" ] && echo 0 > "$vt" 2>/dev/null
-  done
   # ---- GPU/RAM clocks do spruceOS (devfreq; Cuphead faz o mesmo) ----
   # Guarda o valor ANTES de subir e restaura no fim (arquivo em /tmp, porque
   # /sys nao aceita criar ficheiros). min_freq no teto = sem DVFS no meio da
@@ -318,16 +358,27 @@ extract_needed=1
 if [ -d "$GD_AA/StandaloneWindows64" ] || [ -d "$GD_AA/Android" ]; then
   extract_needed=0
 fi
+# cinto e suspensorios: o payload em uso e unity_payload/assets/aa/Android. Se por
+# qualquer motivo o GD_AA acima apontou para gamedata/ (layout antigo) mas o
+# unity_payload existe, extrair de novo e desperdicio - nao extrair.
+if [ "$extract_needed" = 1 ] && [ -d "$PORTDIR/unity_payload/assets/aa/Android" ]; then
+  extract_needed=0
+fi
 
 if [ "$extract_needed" = 1 ]; then
   APK=""
-  for c in "$PORTDIR/ULTRADROID.apk" "$PORTDIR/../ULTRADROID.apk" \
+  # base.apk e o nome que o PROBE informa ao libunity como APK do jogo (de onde o
+  # Unity extrai recursos). Aceitar ele aqui tambem, senao este preflight morre
+  # com 'ULTRADROID.apk nao encontrado' num cartao que esta completo.
+  for c in "$PORTDIR/base.apk" "$PORTDIR/ULTRADROID.apk" "$PORTDIR/../ULTRADROID.apk" \
+           "$PORTDIR/../base.apk" \
            "$HOME/ULTRADROID.apk" "$STATEDIR/ULTRADROID.apk"; do
     [ -f "$c" ] && APK="$c" && break
   done
   if [ -z "$APK" ]; then
-    status "ERRO: gamedata/ vazio E ULTRADROID.apk nao encontrado."
+    status "ERRO: gamedata/ vazio E nenhum APK encontrado (base.apk / ULTRADROID.apk)."
     echo "  colocou o APK em $PORTDIR/?" >&2
+    echo "  ou: python3 tools/install_base_apk.py --apk <ULTRADROID.apk>" >&2
     exit 10
   fi
   phase "extraindo APK - bundles"
@@ -1241,6 +1292,17 @@ if [ -f "$PROBE" ] && [ -f "$PLIB/libunity.so" ] && [ "$ULTRAKILL_LOADER" != "br
   # e o wait nao e sinalizado (NoSuchMethodError em onClick/onDismiss), soltar o
   # cond por tempo. 0 desliga.
   export BENDER_DIALOG_WAIT_RELEASE_SEC="${BENDER_DIALOG_WAIT_RELEASE_SEC:-3}"
+  # ULTRAKILL fix -N (VIDEO PARADO NA LISTA COM MUSICA TOCANDO): o probe so
+  # batia o framebuffer no painel no ramo SEM SDL; no TSP o SDL (driver=mali)
+  # fica pronto, entao SDL_GL_SwapWindow apresentava a surface do SDL enquanto o
+  # Unity desenhava na surface dele (guest_swaps=0, host_present=200, 0 pixel na
+  # tela). Agora o frame loop le o framebuffer atual (glReadPixels) e copia para
+  # /dev/fb0. BENDER_UK_FB=0 desliga (volta ao headless).
+  export BENDER_UK_FB="${BENDER_UK_FB:-1}"
+  export BENDER_UK_WINDOW_W="${BENDER_UK_WINDOW_W:-$ULTRAKILL_INTERNAL_W}"
+  export BENDER_UK_WINDOW_H="${BENDER_UK_WINDOW_H:-$ULTRAKILL_INTERNAL_H}"
+  export ULTRAKILL_FB_DEVICE="${ULTRAKILL_FB_DEVICE:-/dev/fb0}"
+  echo ">> PRESENT fb: BENDER_UK_FB=$BENDER_UK_FB dev=$ULTRAKILL_FB_DEVICE surface=${BENDER_UK_WINDOW_W}x${BENDER_UK_WINDOW_H}"
   echo ">> BENDER WATCHDOG: idle=${BENDER_RENDER_IDLE_WATCHDOG_SEC}s absolute=${BENDER_RENDER_ABSOLUTE_WATCHDOG_SEC}s extend=${BENDER_RENDER_EXTEND_SEC}s"
   # Pula os videos de abertura (FMV). ANTES era 1 por padrao, mas o boot do
   # ULTRAKILL esta morrendo com NullReferenceException em 'main start' e o
