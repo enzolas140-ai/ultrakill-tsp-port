@@ -642,8 +642,10 @@ static void JNICALL j_CallNonvirtualVoidMethod(JNIEnv *e, jobject o, jclass c, j
 EV_NV_VA(core_int_vn,   jint,    j_CallNonvirtualIntMethod)
 EV_NV_VA(core_long_vn,  jlong,   j_CallNonvirtualLongMethod)
 EV_NV_VA(core_float_vn, jfloat,  j_CallNonvirtualFloatMethod)
+EV_NV_VA(core_double_vn, jdouble, j_CallNonvirtualDoubleMethod)
 EV_NV_VA(core_bool_vn,  jboolean,j_CallNonvirtualBooleanMethod)
 EV_NV_VA(core_obj_vn,   jobject, j_CallNonvirtualObjectMethod)
+/* Byte/Char/Short: so a variante variadic e referenciada na vtable abaixo. */
 #undef EV_NV_VA
 static void JNICALL j_CallNonvirtualVoidMethodV(JNIEnv *e, jobject o, jclass c, jmethodID m, va_list ap) {
   (void)c; (void)ap; core_void_vn(e, o, m, 0);
