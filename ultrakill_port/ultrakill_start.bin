@@ -1238,6 +1238,9 @@ if [ -f "$PROBE" ] && [ -f "$PLIB/libunity.so" ] && [ "$ULTRAKILL_LOADER" != "br
   # Sem tela Android isso nunca chega -> cond wait eterno no 1o frame. O probe
   # agora dispara onClick/onCancel nos listeners capturados no show().
   export BENDER_DIALOG_AUTODISMIS="${BENDER_DIALOG_AUTODISMIS:-1}"
+  # e o wait nao e sinalizado (NoSuchMethodError em onClick/onDismiss), soltar o
+  # cond por tempo. 0 desliga.
+  export BENDER_DIALOG_WAIT_RELEASE_SEC="${BENDER_DIALOG_WAIT_RELEASE_SEC:-3}"
   echo ">> BENDER WATCHDOG: idle=${BENDER_RENDER_IDLE_WATCHDOG_SEC}s absolute=${BENDER_RENDER_ABSOLUTE_WATCHDOG_SEC}s extend=${BENDER_RENDER_EXTEND_SEC}s"
   # Pula os videos de abertura (FMV). ANTES era 1 por padrao, mas o boot do
   # ULTRAKILL esta morrendo com NullReferenceException em 'main start' e o
@@ -1406,6 +1409,27 @@ if [ -f "$PROBE" ] && [ -f "$PLIB/libunity.so" ] && [ "$ULTRAKILL_LOADER" != "br
     0|124|125|143)
       echo ">> BENDER concluiu sem crash de sinal (exit $BRC) - NAO roda o bridge legado"
       cp -f "$PORTDIR/unity_probe.log" "$PORTDIR/unity_probe.ultimo.log" 2>/dev/null || true
+      # este ramo dava exit sem RESUMO DO BOOT: parada em wait (exit 143 =
+      # SIGTERM do nosso timeout) ficava sem diagnostico nenhum e parecia
+      # 'o port nem abriu'. Imprime o resumo aqui.
+      {
+          echo ""
+          echo "===== RESUMO DO BOOT (ramo BENDER) ====="
+          echo "  loader=bender exit=$BRC"
+          echo "  resolucao_interna=${ULTRAKILL_INTERNAL_W:-?}x${ULTRAKILL_INTERNAL_H:-?} alvo_fps=${ULTRAKILL_TARGET_FPS:-30} budget_us=${UK_FRAME_US:-33333}"
+          echo "  video=${SDL_VIDEODRIVER:-auto} audio=${SDL_AUDIODRIVER:-?} sdl=${BENDER_SDL_LIBRARY:-libSDL2 padrao}"
+          echo "  display_lock=${UK_DISPLAY_LOCKED:-0} playcore_missing=${BENDER_PLAYCORE_MISSING:-1}"
+          echo "  dialog_auto_dismiss=${BENDER_DIALOG_AUTODISMIS:-1} wait_release_s=${BENDER_DIALOG_WAIT_RELEASE_SEC:-3}"
+          echo "  checkpoint final: $(grep -a 'CHECKPOINT' "$PORTDIR/unity_probe.log" 2>/dev/null | tail -1 | cut -c1-150)"
+          echo "  dialogs no boot: $(grep -ac 'BENDER_JNI\]\[DIALOG' "$PORTDIR/unity_probe.log" 2>/dev/null) | wait: $(grep -ac 'WAIT_BEGIN' "$PORTDIR/unity_probe.log" 2>/dev/null) | sdl: $(grep -ac 'BENDER_SDL' "$PORTDIR/unity_probe.log" 2>/dev/null) | egl: $(grep -ac 'BENDER_EGL' "$PORTDIR/unity_probe.log" 2>/dev/null)"
+          if [ -s "$PORTDIR/unity_payload/log.txt" ]; then
+              echo "  player.log: $(grep -aoE 'Graphics device: [^\r]*|Referenced script missing[^\r]*|Exception: [^\r]*' "$PORTDIR/unity_payload/log.txt" 2>/dev/null | tail -3 | tr '\n' '|')"
+          else
+              echo "  player.log: inexistente (o Unity nao abriu a janela)"
+          fi
+          echo "  > sem linhas sdl:/egl: acima, o jogo parou ANTES da GPU."
+          echo "=========================================="
+      } >> "$LOG" 2>/dev/null
       sync 2>/dev/null || true
       [ -w /proc/sys/vm/swappiness ] && echo 60 > /proc/sys/vm/swappiness 2>/dev/null
       exit $BRC ;;

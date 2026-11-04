@@ -487,9 +487,12 @@ static void *bender_jni_proxy_dispatch(void*proxy,const char*method_name,void*ar
 static void *g_dlg_listener[6];
 static int   g_dlg_listener_n=0;
 static int   g_dlg_pending=0;
+static int   g_dlg_release_armed=0;
+static int   g_dlg_release_used=0;
 static void *g_dlg_shown_obj=NULL;
 static unsigned long g_dlg_autodismiss_count=0;
 static void  bender_dialog_flush(const char*reason);
+static void *bender_dialog_wake_main(void *arg);
 #define BENDER_SYNC_MUTEX 1
 #define BENDER_SYNC_COND 2
 #define BENDER_SYNC_RWLOCK 3
@@ -561,6 +564,21 @@ static void bender_sync_wait_diag(const char*phase,const char*kind,const void*gu
 
 static int bender_pthread_mutex_init(void *guest,const void *guest_attr){BenderSyncSlot*s=bender_sync_slot(guest,BENDER_SYNC_MUTEX,1);if(!s)return ENOMEM;int type=PTHREAD_MUTEX_NORMAL;if(guest_attr){BenderSyncSlot*a=bender_sync_slot(guest_attr,BENDER_SYNC_MUTEXATTR,0);if(a&&a->inited)type=a->meta;}pthread_mutex_lock(&g_bender_sync_lock);if(s->inited)pthread_mutex_destroy(&s->host.mutex);pthread_mutexattr_t ha;pthread_mutexattr_init(&ha);pthread_mutexattr_settype(&ha,type);int rc=pthread_mutex_init(&s->host.mutex,&ha);pthread_mutexattr_destroy(&ha);s->meta=type;s->inited=(rc==0);pthread_mutex_unlock(&g_bender_sync_lock);return rc;}
 static int bender_pthread_mutex_destroy(void *guest){BenderSyncSlot*s=bender_sync_slot(guest,BENDER_SYNC_MUTEX,0);if(!s||!s->inited)return 0;int rc=pthread_mutex_destroy(&s->host.mutex);if(rc==0)s->inited=0;return rc;}
+/* ULTRAKILL fix -L: acorda o cond wait de dialog por tempo. O libunity devolve
+ * as vezes um Method de Runnable para onClick/onDismiss (NoSuchMethodError) e o
+ * wait nao e sinalizado; sem isto o port fica parado ate o watchdog e parece
+ * tela morta. Libera no maximo 8 waits, um a cada BENDER_DIALOG_WAIT_RELEASE_SEC. */
+typedef struct { pthread_cond_t *cond; double sec; } BenderDlgWake;
+static void *bender_dialog_wake_main(void *arg){
+    BenderDlgWake *w=(BenderDlgWake*)arg;
+    if(!w)return NULL;
+    struct timespec ts; ts.tv_sec=(time_t)w->sec; ts.tv_nsec=(long)((w->sec-(double)ts.tv_sec)*1e9);
+    while(ts.tv_sec>0||ts.tv_nsec>0){ if(nanosleep(&ts,&ts)!=0)break; }
+    logmsg("[BENDER_JNI][DIALOG][WAIT_RELEASE] sinalizando cond=%p apos %.1fs (dialog sem UI)\n",(void*)w->cond,w->sec);
+    pthread_cond_broadcast(w->cond);
+    free(w);
+    return NULL;
+}
 static int bender_pthread_mutex_lock(void *guest){BenderSyncSlot*s=bender_mutex_slot(guest,1);if(!s||!s->inited)return EINVAL;int rc=pthread_mutex_trylock(&s->host.mutex);if(rc==0)return 0;if(rc!=EBUSY)return rc;uintptr_t caller=(uintptr_t)__builtin_return_address(0);bender_sync_wait_diag("BEGIN","mutex",guest,caller);rc=pthread_mutex_lock(&s->host.mutex);bender_sync_wait_diag("END","mutex",guest,caller);return rc;}
 static int bender_pthread_mutex_trylock(void *guest){BenderSyncSlot*s=bender_mutex_slot(guest,1);return s&&s->inited?pthread_mutex_trylock(&s->host.mutex):EINVAL;}
 static int bender_pthread_mutex_unlock(void *guest){BenderSyncSlot*s=bender_mutex_slot(guest,1);return s&&s->inited?pthread_mutex_unlock(&s->host.mutex):EINVAL;}
@@ -574,8 +592,31 @@ static int bender_pthread_cond_wait(void *gcond,void *gmutex){BenderSyncSlot*c=b
      * mostra um AlertDialog e dorme num cond wait ate o usuario responder - e
      * aqui nao ha UI Android nenhuma. Se ainda existe um dialog pendente,
      * dispara os listeners ANTES de dormir (o sinal cai exatamente quando o
-     * thread ja esta pronto para esperar). BENDER_DIALOG_AUTODISMIS=0 desliga. */
+     * thread ja esta pronto para esperar). BENDER_DIALOG_AUTODISMIS=0 desliga.
+     *
+     * E porque o callback as vezes nao resolve (o libunity devolve um Method
+     * de Runnable para onClick/onDismiss -> NoSuchMethodError e o wait continua),
+     * aqui tambem arma uma libertacao por tempo: um thread curta o cond apos
+     * BENDER_DIALOG_WAIT_RELEASE_SEC (padrao 3 s), no maximo 8 vezes. Sem isso o
+     * port fica 90 s parado e vocer ve 'nao abriu' - e nao e tela preta, e wait. */
     bender_dialog_flush("pre-cond-wait");
+    if(g_dlg_release_armed&&g_dlg_release_used<8&&c->inited){
+        const char*rs=getenv("BENDER_DIALOG_WAIT_RELEASE_SEC");
+        double sec=rs&&*rs?atof(rs):3.0;
+        if(sec>0.0){
+            g_dlg_release_armed=0; ++g_dlg_release_used;
+            typedef struct { pthread_cond_t *cond; double sec; } BenderDlgWakeLocal;
+            BenderDlgWakeLocal *w=(BenderDlgWakeLocal*)malloc(sizeof(BenderDlgWakeLocal));
+            if(w){
+                w->cond=&c->host.cond; w->sec=sec;
+                pthread_t tw;
+                if(pthread_create(&tw,NULL,bender_dialog_wake_main,w)==0){
+                    pthread_detach(tw);
+                    logmsg("[BENDER_JNI][DIALOG][WAIT_ARM] cond=%p liberado em %.1fs (tentativa %d/8)\n",(void*)gcond,sec,g_dlg_release_used);
+                } else free(w);
+            }
+        }
+    }
     int rc=pthread_cond_wait(&c->host.cond,&m->host.mutex);bender_sync_wait_diag("END","cond",gcond,caller);return rc;}
 static int bender_pthread_cond_timedwait(void *gcond,void *gmutex,const struct timespec *ts){BenderSyncSlot*c=bender_cond_slot(gcond,1);BenderSyncSlot*m=bender_mutex_slot(gmutex,1);return c&&m?pthread_cond_timedwait(&c->host.cond,&m->host.mutex,ts):EINVAL;}
 static int bender_pthread_cond_signal(void *guest){BenderSyncSlot*s=bender_cond_slot(guest,1);return s?pthread_cond_signal(&s->host.cond):EINVAL;}
@@ -2859,10 +2900,13 @@ if(m&&(!strcmp(name,"setTitle")||!strcmp(name,"setMessage"))){const char*s=jni_o
     if(m&&!strcmp(name,"show")&&obj){
         BObj*dlg=new_obj(4,"android/app/AlertDialog",NULL);
         g_dlg_shown_obj=dlg;
-        g_dlg_pending=1;
         logmsg("[BENDER_JNI][DIALOG] show() com %d listener(s); auto-dismiss=%d\n",
                g_dlg_listener_n,(!getenv("BENDER_DIALOG_AUTODISMIS")||strcmp(getenv("BENDER_DIALOG_AUTODISMIS"),"0")));
         bender_dialog_flush("show");
+        /* DEPOIS do flush (que limpa os flags): o wait do libunity vem a seguir,
+         * entao deixa armado tanto o redispacho quanto a liberacao por tempo. */
+        g_dlg_pending=1;
+        g_dlg_release_armed=1;
         return dlg;
     }
     if(m&&(!strcmp(name,"dismiss")||!strcmp(name,"hide"))){ g_dlg_pending=0; g_dlg_listener_n=0; }

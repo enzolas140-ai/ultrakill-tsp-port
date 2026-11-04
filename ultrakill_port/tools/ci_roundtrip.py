@@ -37,19 +37,14 @@ API = 'https://api.github.com'
 # o que vai do cartao para o repo (fonte)
 SYNC = [('bender', 'ultrakill_port/bender'),
         ('wrapper', 'ultrakill_port/wrapper'),
-        ('tools/dumpelf.py', 'ultrakill_port/tools/dumpelf.py'),
-        ('tools/ccheck.py', 'ultrakill_port/tools/ccheck.py'),
-        ('tools/check_vtable.py', 'ultrakill_port/tools/check_vtable.py'),
-        ('tools/ci_log.py', 'ultrakill_port/tools/ci_log.py'),
-        ('tools/ci_get.py', 'ultrakill_port/tools/ci_get.py'),
-        ('tools/ci_roundtrip.py', 'ultrakill_port/tools/ci_roundtrip.py'),
-        ('tools/tune_prefs.py', 'ultrakill_port/tools/tune_prefs.py'),
+        ('tools', 'ultrakill_port/tools'),
         ('ultrakill_start.sh', 'ultrakill_port/ultrakill_start.sh'),
         ('ultrakill_start.bin', 'ultrakill_port/ultrakill_start.bin'),
         ('ultrakill.conf', 'ultrakill_port/ultrakill.conf'),
         ('ultrakill.txt', 'ultrakill_port/ultrakill.txt'),
-        ('LEIA-ESTE-PRIMEIRO.txt', 'ultrakill_port/LEIA-ESTE-PRIMEIRO.txt')]
-SKIP_DIR = ('build-arm64', 'build-host', '__pycache__')
+        ('LEIA-ESTE-PRIMEIRO.txt', 'ultrakill_port/LEIA-ESTE-PRIMEIRO.txt'),
+        ('.github/workflows/build-wrapper.yml', 'ultrakill_port/.github/workflows/build-wrapper.yml')]
+SKIP_DIR = ('build-arm64', 'build-host', '__pycache__', '.git', '.backups')
 
 # o que volta do artifact para o cartao (binario)
 INSTALL = [('libs/arm64/libOpenSLES.so', 'libs/arm64/libOpenSLES.so'),
@@ -117,12 +112,19 @@ def sync_to_repo(repo):
         if not os.path.exists(s):
             print('  (sem %s)' % src); continue
         if os.path.isdir(s):
-            if os.path.isdir(d):
-                shutil.rmtree(d)
-            def ignore(dirpath, names):
-                return [x for x in names if x in SKIP_DIR or x.endswith('.bak-revl')]
-            shutil.copytree(s, d, ignore=ignore)
-            n += sum(len(fs) for _, _, fs in os.walk(d))
+            # merge (nao apaga o destino inteiro): assim arquivos novos do cartao
+            # entram e o que so existe no repo (ex.: README do CI) nao e perdido.
+            os.makedirs(d, exist_ok=True)
+            for root_, dirs, files in os.walk(s):
+                rel = os.path.relpath(root_, s)
+                td = os.path.normpath(os.path.join(d, rel))
+                os.makedirs(td, exist_ok=True)
+                for x in files:
+                    if x in SKIP_DIR or x.endswith(('.bak-revl', '.stub-noop.bak', '.pyc')):
+                        continue
+                    shutil.copy2(os.path.join(root_, x), os.path.join(td, x))
+                    n += 1
+            continue
         else:
             os.makedirs(os.path.dirname(d), exist_ok=True)
             shutil.copy2(s, d); n += 1

@@ -27,6 +27,7 @@ DT_VERNEED    = 0x6ffffffe
 DT_IGNORE     = 0x6ffffffa
 DT_VERDEF     = 0x6ffffffc
 DT_VERDEFNUM  = 0x6ffffffd
+DT_VERSYM     = 0x6ffffff0
 
 
 def _file_offset_of_vaddr(elf, vaddr):
@@ -76,21 +77,16 @@ def unversion(path, check_only=False):
            'verneed_off': verneed_file_off}
 
     if not check_only:
-        # 1. zerar versym SO dos SIMBOLOS INDEFINIDOS (imports). Entry i de
-        #    .gnu.version corresponde a dynsym[i]. Index 0 = "sem versao" p/
-        #    o glibc, que faz lookup plain e NAO indexa l_versions[] (que
-        #    ficou NULL apos matarmos DT_VERNEED). Deixamos os DEFINIDOS
-        #    intactos (apontam p/ DT_VERDEF, que preservamos) pra UnityMain
-        #    continuar exportado/visivel.
+        # 1. TODOS os versym -> 0 (includindo definidos). Se um definido
+        #    ficar versym=2 apontando p/ DT_VERDEF, o glibc indexa
+        #    map->l_versions[2]; mas como matamos DT_VERNEED, l_versions fica
+        #    NULL/inconsistente -> SIGSEGV em qualquer dlsym/RTLD_DEFAULT que
+        #    varra esta lib (foi exatamente o crash em shim_input_start).
+        #    zerando tudo, nenhuma symbol referencia versao, l_versions nem e
+        #    consultado. dlsym(hu,"nome") acha pelo nome de qualquer forma.
         if versym_off is not None:
-            dsym = elf.get_section_by_name('.dynsym')
-            idx = 0
-            for s in dsym.iter_symbols():
-                if idx * 2 >= versym_size:
-                    break
-                if s['st_shndx'] == 'SHN_UNDEF':
-                    struct.pack_into('<H', data, versym_off + idx * 2, 0)
-                idx += 1
+            for i in range(0, versym_size, 2):
+                struct.pack_into('<H', data, versym_off + i, 0)
         # 2. DT_VERNEEDNUM -> 0
         if verneednum_file_off is not None:
             if is64:
@@ -106,6 +102,28 @@ def unversion(path, check_only=False):
                 struct.pack_into('<q', data, verneed_file_off, DT_IGNORE)
             else:
                 struct.pack_into('<i', data, verneed_file_off, DT_IGNORE)
+        # 4. DT_VERDEF -> DT_IGNORE e DT_VERDEFNUM -> 0 (mesma logica, agora
+        #    p/ os exports proprios da lib). Sem isto, 6 simbolos definidos
+        #    com versym=2 ainda chamariam l_versions[2] = NULL.
+        d_off = dyn['sh_offset'] if dyn else None
+        d_ent = (dyn['sh_entsize'] if dyn else (16 if is64 else 8)) or 16
+        d_cnt = (dyn['sh_size'] // d_ent) if dyn else 0
+        for i in range(d_cnt):
+            o = d_off + i * d_ent
+            tag = struct.unpack_from('<q' if is64 else '<i', data, o)[0]
+            if tag == DT_VERDEF:
+                struct.pack_into('<q' if is64 else '<i', data, o, DT_IGNORE)
+            elif tag == DT_VERDEFNUM:
+                struct.pack_into('<Q' if is64 else '<I', data,
+                                 o + (8 if is64 else 4), 0)
+            # 5. DT_VERSYM -> DT_IGNORE: CRUCIAL. Sem VERNEED e sem VERDEF,
+            #    o glibc nao alocaria l_versions[]; mas se DT_VERSYM continua
+            #    presente, l_versyms != NULL e o codigo de symbol lookup faz
+            #    &l_versions[idx] sobre NULL -> SIGSEGV em dl*() chamado dos
+            #    construtores do libunity.so (foi o crash ld+0xe900 si_addr=8).
+            #    Matando DT_VERSYM o glibc trata a lib como 100% sem versao.
+            elif tag == DT_VERSYM:
+                struct.pack_into('<q' if is64 else '<i', data, o, DT_IGNORE)
         with open(path, 'wb') as f:
             f.write(data)
     return rep
