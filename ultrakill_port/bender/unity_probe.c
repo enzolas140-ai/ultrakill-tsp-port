@@ -3159,7 +3159,15 @@ static void *bender_jni_proxy_dispatch(void*proxy,const char*method_name,void*ar
     }
     if(!decl)decl=g_jnibridge_class;
     logmsg("[BENDER_JNI][JNIBRIDGE_DISPATCH][DECL] method=%s interface=%s decl=%p\n",method_name?method_name:"?",want_iface?want_iface:"default",decl);
-    const char*callback_sig=is_handler?"(Landroid/os/Message;)Z":(is_frame?"(J)V":(is_surface_frame?"(Landroid/graphics/SurfaceTexture;)V":(is_ump_failure?"(Lcom/google/android/ump/FormError;)V":(method_name&&!strcmp(method_name,"onClick")?"(Landroid/content/DialogInterface;I)V":((method_name&&(!strcmp(method_name,"onCancel")||!strcmp(method_name,"onDismiss")||!strcmp(method_name,"onKey")))?"(Landroid/content/DialogInterface;)V":"()V"))));
+    const char*callback_sig="()V";
+    if(is_handler)callback_sig="(Landroid/os/Message;)Z";
+    else if(is_frame)callback_sig="(J)V";
+    else if(is_surface_frame)callback_sig="(Landroid/graphics/SurfaceTexture;)V";
+    else if(is_ump_failure)callback_sig="(Lcom/google/android/ump/FormError;)V";
+    /* ULTRAKILL fix -L: os callbacks de dialog precisam da assinatura real, senao
+     * o JNIBridge.do_dispatch do libunity nao casa o metodo com o peer C++. */
+    else if(method_name&&!strcmp(method_name,"onClick"))callback_sig="(Landroid/content/DialogInterface;I)V";
+    else if(method_name&&(!strcmp(method_name,"onCancel")||!strcmp(method_name,"onDismiss")))callback_sig="(Landroid/content/DialogInterface;)V";
     BObj**rm_slot=is_frame?&g_jnibridge_cached_rm_frame:(is_handler?&g_jnibridge_cached_rm_handler:NULL);
     BObjArray**args_slot=is_frame?&g_jnibridge_cached_args_frame:(is_handler?&g_jnibridge_cached_args_handler:NULL);
     BObj*rm=rm_slot?__atomic_load_n(rm_slot,__ATOMIC_ACQUIRE):NULL;
