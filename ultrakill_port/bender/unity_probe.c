@@ -486,7 +486,10 @@ static int bender_sigsuspend(const BionicSigSet64 *set){sigset_t hs;if(!set){err
 static void *bender_jni_proxy_dispatch(void*proxy,const char*method_name,void*arg0);
 static void *g_dlg_listener[6];
 static int   g_dlg_listener_n=0;
+static int   g_dlg_pending=0;
+static void *g_dlg_shown_obj=NULL;
 static unsigned long g_dlg_autodismiss_count=0;
+static void  bender_dialog_flush(const char*reason);
 #define BENDER_SYNC_MUTEX 1
 #define BENDER_SYNC_COND 2
 #define BENDER_SYNC_RWLOCK 3
@@ -566,7 +569,14 @@ static int bender_pthread_mutexattr_settype(void *guest,int type){BenderSyncSlot
 static int bender_pthread_mutexattr_destroy(void *guest){BenderSyncSlot*s=bender_sync_slot(guest,BENDER_SYNC_MUTEXATTR,0);if(s)s->inited=0;return 0;}
 static int bender_pthread_cond_init(void *guest,const void *guest_attr){BenderSyncSlot*s=bender_sync_slot(guest,BENDER_SYNC_COND,1);if(!s)return ENOMEM;clockid_t clk=CLOCK_REALTIME;if(guest_attr){BenderSyncSlot*a=bender_sync_slot(guest_attr,BENDER_SYNC_CONDATTR,0);if(a&&a->inited&&a->meta)clk=(clockid_t)a->meta;}pthread_mutex_lock(&g_bender_sync_lock);if(s->inited)pthread_cond_destroy(&s->host.cond);pthread_condattr_t ha;pthread_condattr_init(&ha);pthread_condattr_setclock(&ha,clk);int rc=pthread_cond_init(&s->host.cond,&ha);pthread_condattr_destroy(&ha);s->meta=(int)clk;s->inited=(rc==0);pthread_mutex_unlock(&g_bender_sync_lock);return rc;}
 static int bender_pthread_cond_destroy(void *guest){BenderSyncSlot*s=bender_sync_slot(guest,BENDER_SYNC_COND,0);if(!s||!s->inited)return 0;int rc=pthread_cond_destroy(&s->host.cond);if(rc==0)s->inited=0;return rc;}
-static int bender_pthread_cond_wait(void *gcond,void *gmutex){BenderSyncSlot*c=bender_cond_slot(gcond,1);BenderSyncSlot*m=bender_mutex_slot(gmutex,1);if(!c||!m)return EINVAL;uintptr_t caller=(uintptr_t)__builtin_return_address(0);bender_sync_wait_diag("BEGIN","cond",gcond,caller);int rc=pthread_cond_wait(&c->host.cond,&m->host.mutex);bender_sync_wait_diag("END","cond",gcond,caller);return rc;}
+static int bender_pthread_cond_wait(void *gcond,void *gmutex){BenderSyncSlot*c=bender_cond_slot(gcond,1);BenderSyncSlot*m=bender_mutex_slot(gmutex,1);if(!c||!m)return EINVAL;uintptr_t caller=(uintptr_t)__builtin_return_address(0);bender_sync_wait_diag("BEGIN","cond",gcond,caller);
+    /* ULTRAKILL fix -L: Ultima linha de defesa. O Unity (AndroidHelper/Dialog)
+     * mostra um AlertDialog e dorme num cond wait ate o usuario responder - e
+     * aqui nao ha UI Android nenhuma. Se ainda existe um dialog pendente,
+     * dispara os listeners ANTES de dormir (o sinal cai exatamente quando o
+     * thread ja esta pronto para esperar). BENDER_DIALOG_AUTODISMIS=0 desliga. */
+    bender_dialog_flush("pre-cond-wait");
+    int rc=pthread_cond_wait(&c->host.cond,&m->host.mutex);bender_sync_wait_diag("END","cond",gcond,caller);return rc;}
 static int bender_pthread_cond_timedwait(void *gcond,void *gmutex,const struct timespec *ts){BenderSyncSlot*c=bender_cond_slot(gcond,1);BenderSyncSlot*m=bender_mutex_slot(gmutex,1);return c&&m?pthread_cond_timedwait(&c->host.cond,&m->host.mutex,ts):EINVAL;}
 static int bender_pthread_cond_signal(void *guest){BenderSyncSlot*s=bender_cond_slot(guest,1);return s?pthread_cond_signal(&s->host.cond):EINVAL;}
 static int bender_pthread_cond_broadcast(void *guest){BenderSyncSlot*s=bender_cond_slot(guest,1);return s?pthread_cond_broadcast(&s->host.cond):EINVAL;}
@@ -2708,6 +2718,29 @@ static int bender_reliance_push_payload_methodid_match_fix103(BObj*m){
     return !strcmp(sig,"(Lcom/unity3d/player/UnityPlayerForActivityOrService;)Ljava/lang/String;") ||
            !strcmp(sig,"(Landroid/content/Context;)Ljava/lang/String;");
 }
+/* ULTRAKILL fix -L: dispara os listeners de dialog capturados (onClick com o
+ * AlertDialog como 'dialog' e depois onCancel) e limpa o estado. Idempotente:
+ * age so se houver pendencia. Chamado de show() e, como ultima linha de
+ * defesa, de bender_pthread_cond_wait() - porque o libunity dorme nesse cond
+ * wait ate alguem responder o dialog, e aqui nao existe UI Android. */
+static void bender_dialog_flush(const char*reason){
+    const char*ad=getenv("BENDER_DIALOG_AUTODISMIS");
+    if(ad&&!strcmp(ad,"0"))return;
+    if(!g_dlg_pending&&!g_dlg_listener_n)return;
+    int n=g_dlg_listener_n; g_dlg_listener_n=0; g_dlg_pending=0;
+    ++g_dlg_autodismiss_count;
+    if(!n)return;
+    void*dlgobj=g_dlg_shown_obj?g_dlg_shown_obj:(void*)new_obj(4,"android/app/AlertDialog",NULL);
+    g_dlg_shown_obj=dlgobj;
+    for(int q=0;q<n;q++){
+        void*lp=g_dlg_listener[q]; g_dlg_listener[q]=NULL;
+        if(!lp)continue;
+        logmsg("[BENDER_JNI][DIALOG][AUTODISMIS] reason=%s n=%d/%d proxy=%p -> onClick(dialog)\n",reason?reason:"?",q+1,n,lp);
+        bender_jni_proxy_dispatch(lp,"onClick",dlgobj);
+        logmsg("[BENDER_JNI][DIALOG][AUTODISMIS] reason=%s proxy=%p -> onCancel(dialog)\n",reason?reason:"?",lp);
+        bender_jni_proxy_dispatch(lp,"onCancel",dlgobj);
+    }
+}
 static void *jni_call_object_common_arg(BEnv*env,void*obj,void*mid,const char*variant,void*arg0){BObj*m=(BObj*)mid;++g_jni_call_count;const char*name=m?m->a:"?";const char*sig=m?m->b:"?";const char*ret=jni_ret_sig(m);set_checkpoint("JNI CallObjectMethod%s method=%s sig=%s",variant?variant:"",name,sig);logmsg("[BENDER_JNI][CALL] Object%s obj=%p method=%s sig=%s\n",variant?variant:"",obj,name,sig);
 if(m&&!strcmp(name,"getBytes")&&!strcmp(sig,"(Ljava/lang/String;)[B")){
     void*soft_bytes_fix100=bender_soft_string_getbytes_fix100(env,obj);
@@ -2809,34 +2842,28 @@ if(m&&(!strcmp(name,"setTitle")||!strcmp(name,"setMessage"))){const char*s=jni_o
  * callback do listener. Sem tela Android esse toque nunca chega -> a thread de
  * render dorme em pthread_cond_wait para sempre (log: show() ->
  * BENDER_UI_THREAD RETURN -> BENDER_SYNC WAIT_BEGIN libunity.so+0x2e38ac).
- * Entao capturamos os listeners que o Builder registrar e, no show(),
- * disparamos onClick/onCancel nos proxies guardados: o Unity recebe a
- * resposta do dialog e segue. BENDER_DIALOG_AUTODISMIS=0 desliga. */
-if(m&&obj&&bender_jni_class_name(obj)&&!strcmp(bender_jni_class_name(obj),"android/app/AlertDialog$Builder")){
-    const char*ad=getenv("BENDER_DIALOG_AUTODISMIS");int ad_on=(!ad||!*ad||strcmp(ad,"0"));
-    if(!strncmp(name,"setOn",5)&&arg0){
+ * ATENCAO (aprendido no log de 09:37): o 'obj' que o Unity passa nem sempre e
+ * reconhecivel como AlertDialog$Builder por bender_jni_class_name(), entao a
+ * captura e pelo NOME do metodo - que so aparece em builder de dialog.
+ * BENDER_DIALOG_AUTODISMIS=0 desliga. */
+{
+    int is_dlg_m = m && (!strncmp(name,"setOn",5) || !strcmp(name,"setPositiveButton")
+                         || !strcmp(name,"setNegativeButton") || !strcmp(name,"setNeutralButton"));
+    if(is_dlg_m && arg0){
         if(g_dlg_listener_n<6)g_dlg_listener[g_dlg_listener_n++]=arg0;
-        logmsg("[BENDER_JNI][DIALOG] %s capturado proxy=%p (auto-dismiss=%d)\n",name,arg0,ad_on);
+        logmsg("[BENDER_JNI][DIALOG] %s capturado proxy=%p (total=%d)\n",name,arg0,g_dlg_listener_n);
         return obj?obj:new_obj(4,ret,NULL);
     }
-    if(!strcmp(name,"show")){
+    if(m&&!strcmp(name,"show")&&obj){
         BObj*dlg=new_obj(4,"android/app/AlertDialog",NULL);
-        logmsg("[BENDER_JNI][DIALOG] show() -> auto-dismiss de %d listener(s)=%d\n",g_dlg_listener_n,ad_on);
-        if(ad_on&&g_dlg_listener_n){
-            int n=g_dlg_listener_n; g_dlg_listener_n=0;
-            ++g_dlg_autodismiss_count;
-            for(int q=0;q<n;q++){
-                void*lp=g_dlg_listener[q]; g_dlg_listener[q]=NULL;
-                if(!lp)continue;
-                logmsg("[BENDER_JNI][DIALOG] disparando onClick proxy=%p dialog=%p\n",lp,(void*)dlg);
-                bender_jni_proxy_dispatch(lp,"onClick",dlg);
-                logmsg("[BENDER_JNI][DIALOG] disparando onCancel proxy=%p\n",lp);
-                bender_jni_proxy_dispatch(lp,"onCancel",dlg);
-            }
-        }
+        g_dlg_shown_obj=dlg;
+        g_dlg_pending=1;
+        logmsg("[BENDER_JNI][DIALOG] show() com %d listener(s); auto-dismiss=%d\n",
+               g_dlg_listener_n,(!getenv("BENDER_DIALOG_AUTODISMIS")||strcmp(getenv("BENDER_DIALOG_AUTODISMIS"),"0")));
+        bender_dialog_flush("show");
         return dlg;
     }
-    if(!strcmp(name,"dismiss")||!strcmp(name,"cancel")){ g_dlg_listener_n=0; return NULL; }
+    if(m&&(!strcmp(name,"dismiss")||!strcmp(name,"hide"))){ g_dlg_pending=0; g_dlg_listener_n=0; }
 }
 if(m&&strcmp(name,"getDefault")==0&&ret&&strcmp(ret,"Ljava/util/Locale;")==0){
     char l[16],c[16],tag[40],legacy[40];bender_locale_values_2749(l,sizeof(l),c,sizeof(c),tag,sizeof(tag),legacy,sizeof(legacy));
