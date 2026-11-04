@@ -459,7 +459,8 @@ def check_probe_markers(root, rep):
     if not os.path.isfile(p):
         rep.add('FAIL', 'probe instalado', 'unity_probe.aarch64 ausente'); return
     d = open(p, 'rb').read()
-    need = [b'BENDER_UK_FB', b'BENDER_UK_WINDOW_W', b'BENDER_UK_PRESENT',
+    need = [b'BENDER_UK_FB', b'BENDER_UK_BLIT_SDL', b'BENDER_UK_WINDOW_W', b'BENDER_UK_PRESENT',
+            b'fonte encontrada',
             b'BENDER_DIALOG_WAIT_RELEASE_SEC', b'BENDER_DIALOG_AUTODISMIS',
             b'BENDER_PLAYCORE_MISSING', b'BENDER_MOUSE_TOGGLE_START_R1', b'/dev/fb0']
     miss = [n.decode() for n in need if n not in d]

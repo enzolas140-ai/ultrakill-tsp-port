@@ -1302,7 +1302,11 @@ if [ -f "$PROBE" ] && [ -f "$PLIB/libunity.so" ] && [ "$ULTRAKILL_LOADER" != "br
   export BENDER_UK_WINDOW_W="${BENDER_UK_WINDOW_W:-$ULTRAKILL_INTERNAL_W}"
   export BENDER_UK_WINDOW_H="${BENDER_UK_WINDOW_H:-$ULTRAKILL_INTERNAL_H}"
   export ULTRAKILL_FB_DEVICE="${ULTRAKILL_FB_DEVICE:-/dev/fb0}"
-  echo ">> PRESENT fb: BENDER_UK_FB=$BENDER_UK_FB dev=$ULTRAKILL_FB_DEVICE surface=${BENDER_UK_WINDOW_W}x${BENDER_UK_WINDOW_H}"
+  # fix -P: alem do /dev/fb0, copia o FBO do Unity para o framebuffer 0 do
+  # contexto SDL e faz SDL_GL_SwapWindow - o mesmo caminho que faz o Cuphead
+  # aparecer no TSP. 0 = so /dev/fb0.
+  export BENDER_UK_BLIT_SDL="${BENDER_UK_BLIT_SDL:-1}"
+  echo ">> PRESENT fb: BENDER_UK_FB=$BENDER_UK_FB BENDER_UK_BLIT_SDL=$BENDER_UK_BLIT_SDL dev=$ULTRAKILL_FB_DEVICE surface=${BENDER_UK_WINDOW_W}x${BENDER_UK_WINDOW_H}"
   # ULTRAKILL fix -N: o jogo ja RODA (log de 05/11: audio, ES, GL, e ele
   # REESCREVE as proprias preferencias na saida). O auditor pegou isso: o
   # frameRateLimit do ULTRAKILL tinha ido de 60 para 7. Se naoforcarmos o valor

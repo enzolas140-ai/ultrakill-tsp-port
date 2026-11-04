@@ -6115,8 +6115,57 @@ static unsigned g_uk_src_fbo;      /* 0 = framebuffer padrao */
 static int      g_uk_probe_left = 6;   /* tentativas de descoberta de FBO */
 static int      g_uk_ctx_announced;
 #define UK_GL_READ_FRAMEBUFFER   0x8CA8u
+#define UK_GL_DRAW_FRAMEBUFFER   0x8CA9u
+#define UK_GL_FRAMEBUFFER        0x8D40u
 #define UK_GL_FRAMEBUFFER_BINDING 0x8CA6u
+#define UK_GL_READ_FRAMEBUFFER_BINDING 0x8CAAu
 #define UK_GL_VERSION            0x1F02u
+#define UK_GL_COLOR_BUFFER_BIT   0x00004000u
+#define UK_GL_NEAREST            0x2600u
+typedef void (*UkBlitFramebufferFn)(int,int,int,int,int,int,int,int,unsigned,unsigned,int);
+static UkBlitFramebufferFn g_uk_blit_fb;
+static unsigned long g_uk_blit_calls;
+
+/* ULTRAKILL fix -P: segundo caminho de present, e o que tem de funcionar neste
+ * hardware: copia o FBO do Unity para o framebuffer 0 do CONTEXTO DO SDL e faz
+ * SDL_GL_SwapWindow - e exatamente o caminho que faz o Cuphead aparecer no
+ * TrimUI Smart Pro (SDL driver=mali). Nao precisa shader: glBlitFramebuffer
+ * (GLES3) resolve. BENDER_UK_BLIT_SDL=0 desliga. */
+static int uk_sdl_blit_present(int w, int h){
+    const char *off = getenv("BENDER_UK_BLIT_SDL");
+    int saved_draw = 0, saved_read = 0;
+    int dw, dh;
+    if(off && (!strcmp(off,"0") || !strcmp(off,"off"))) return 0;
+    if(!g_bender_sdl_ready || !g_sdl_GL_MakeCurrent || !g_sdl_GL_SwapWindow) return 0;
+    if(!g_uk_blit_fb) g_uk_blit_fb = (UkBlitFramebufferFn)uk_gl_addr("glBlitFramebuffer");
+    if(!g_uk_blit_fb){
+        static int announced;
+        if(!announced){ announced = 1; uk_log("[BENDER_UK_BLIT] glBlitFramebuffer ausente no driver; ficando so no fb0\n"); }
+        return 0;
+    }
+    if(g_sdl_GL_MakeCurrent(g_bender_sdl_window, g_bender_sdl_gl) != 0) return 0;
+    if(g_uk_get_integerv){
+        g_uk_get_integerv(UK_GL_FRAMEBUFFER_BINDING, &saved_draw);
+        g_uk_get_integerv(UK_GL_READ_FRAMEBUFFER_BINDING, &saved_read);
+    }
+    dw = g_bender_sdl_draw_w > 0 ? g_bender_sdl_draw_w : w;
+    dh = g_bender_sdl_draw_h > 0 ? g_bender_sdl_draw_h : h;
+    if(g_uk_bind_fbo){
+        g_uk_bind_fbo(UK_GL_READ_FRAMEBUFFER, g_uk_src_fbo);
+        g_uk_bind_fbo(UK_GL_DRAW_FRAMEBUFFER, 0u);
+    }
+    g_uk_blit_fb(0, 0, w, h, 0, 0, dw, dh, UK_GL_COLOR_BUFFER_BIT, UK_GL_NEAREST, 0);
+    if(g_uk_bind_fbo){
+        g_uk_bind_fbo(UK_GL_DRAW_FRAMEBUFFER, (unsigned)saved_draw);
+        g_uk_bind_fbo(UK_GL_READ_FRAMEBUFFER, (unsigned)saved_read);
+    }
+    g_sdl_GL_SwapWindow(g_bender_sdl_window);
+    ++g_uk_blit_calls;
+    if(g_uk_blit_calls <= 3ul || g_uk_blit_calls % 300ul == 0ul)
+        uk_log("[BENDER_UK_BLIT] FBO=%u -> FB0 SDL %dx%d swap #%lu\n", g_uk_src_fbo, dw, dh, g_uk_blit_calls);
+    return 1;
+}
+
 static void uk_gl_syms(void){
     if(!g_uk_get_integerv)  g_uk_get_integerv  = (UkGetIntegerVFn)uk_gl_addr("glGetIntegerv");
     if(!g_uk_bind_fbo)      g_uk_bind_fbo      = (UkBindFramebufferFn)uk_gl_addr("glBindFramebuffer");
@@ -6247,6 +6296,9 @@ static void uk_fb_present_frame(int w,int h){
     if(W>iw)W=iw;
     if(H>ih)H=ih;
     uk_present(W,H);
+    /* fix -P: alem do /dev/fb0, tenta o caminho do SDL (blit FBO->FB0+swap).
+     * Se o painel for varrido pelo SDL/mali (como no Cuphead), e aqui que aparece. */
+    uk_sdl_blit_present(W,H);
 }
 
 static BenderEGLBoolean bender_eglSwapBuffers(BenderEGLDisplay d,BenderEGLSurface s){
