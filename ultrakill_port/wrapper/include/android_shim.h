@@ -166,7 +166,15 @@ void         shim_input_event_free(AInputEvent *ev);
 int32_t      shim_input_queue_push(AInputQueue *q, AInputEvent *ev);
 AInputQueue *shim_input_queue_global(void);
 
-/* -------- SLES/sLESAll.h (subset minimizado) -------- */
+/* -------- SLES/sLESAll.h: APAGADO em 2026-11-03 (rev. TSP) --------
+ * As typedefs SL* desta secao eram um subset INVENTADO (SLobject/SLinterface
+ * + slRealizeObject/slGetInterface, que NAO existem no OpenSL ES real) e só
+ * eram usadas pelo stub no-op antigo - que era a causa do SIGBUS no
+ * nativeResume. O ABI verdadeiro (vtables COM-like de 2 niveis + globais
+ * SL_IID_*) esta em include/sles_shim.h, implementado em
+ * stubs/opensles_stub.c. Os decls abaixo ficam so como comentario historico
+ * e NAO devem ser usados: inclusive, darao erro de assinatura contra
+ * sles_shim.h se algum TU incluir os dois. */
 typedef uint8_t  SLuint8;   typedef uint16_t SLuint16;
 typedef uint32_t SLuint32;  typedef int32_t  SLint32;
 typedef uint32_t SLresult;

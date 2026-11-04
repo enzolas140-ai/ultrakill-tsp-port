@@ -21,14 +21,28 @@
 #include <dlfcn.h>
 #include <libgen.h>
 #include <limits.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 #include <unistd.h>
 
 #ifndef PATH_MAX
 #define PATH_MAX 4096
 #endif
+
+/* env numerico com default (usado pelo teto do loop de render). */
+static int env_int_or(const char *k, int dflt) {
+  const char *v = getenv(k);
+  if (!v || !*v) return dflt;
+  return (int)strtol(v, NULL, 10);
+}
+static int64_t now_ms_bridge(void) {
+  struct timespec ts;
+  clock_gettime(CLOCK_MONOTONIC, &ts);
+  return (int64_t)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
+}
 
 extern AAssetManager *shim_AAssetManager_fromPath(const char *basepath);
 extern ANativeWindow *ANativeWindow_get_shim(void);
@@ -225,6 +239,18 @@ int main(int argc, char **argv, char **envp) {
       shim_jni_dump_natives();
 
       const char *UP = "com/unity3d/player/UnityPlayer";
+      /* PORTA DE INPUT REAL deste build: o Unity NAO le AInputQueue (o
+       * libunity.so nao importa nenhum AInputQueue_* - ver wrapper/README).
+       * Tudo de input entra por nativeInjectEvent(InputEvent)Z, que ele
+       * mesmo registrou. Entregamos o ponteiro + o JNIEnv ao modulo de
+       * input AGORA, depois do JNI_OnLoad (que e quando os natives
+       * existem). */
+      void *fnInject = shim_jni_find_native(UP, "nativeInjectEvent");
+      if (!fnInject) fnInject = shim_jni_find_native(NULL, "nativeInjectEvent");
+      shim_input_set_unity_inject(input_ctx, fnInject, env);
+      fprintf(stderr, ">> nativeInjectEvent = %p (input %s)\n", fnInject,
+              fnInject ? "ATIVO via JNI" : "SEM porta JNI - so AInputQueue");
+
       /* Mapeado pelo proprio JNI_OnLoad (log do device): nao ha
        * nativeSetup/nativeRun neste Unity 2019.4 Android. O que a
        * UnityPlayer.java faz apos registrar os natives e:
@@ -284,15 +310,35 @@ int main(int argc, char **argv, char **envp) {
       if (fnRender) {
         fprintf(stderr, ">> loop nativeRender comecando\n");
         long frames = 0;
-        while (frames < 600) {   /* ~10 min de teste; quit via nativeDone */
+        /* Teto de frames: 0 = sem teto (jogar ate o jogo pedir saida).
+         * Antes era 600 frames fixos (~10 min) e o port SAIA do jogo sozinho
+         * no meio da partida. ULTRAKILL_MAX_FRAMES=<n> re-limita. */
+        long max_frames = (long)env_int_or("ULTRAKILL_MAX_FRAMES", 0);
+        int64_t t_start = now_ms_bridge();
+        int64_t max_sec = (int64_t)env_int_or("ULTRAKILL_MAX_SEC", 0);
+        while (1) {
           int cont = ((Fn_Z_noargs)fnRender)(env, NULL);
           frames++;
-          /* NO_SDL_GL (R36S): SDL nao viu GL, enta copiamos o pbuffer
-           * pro KMS por conta propria a cada frame. */
+          /* NO_SDL_GL (fallback software): SDL nao viu GL, entao copiamos o
+           * pbuffer pro KMS/fb0 por conta propria a cada frame. No caminho
+           * normal (PowerVR + window EGL) isto e no-op (pixel_buf == NULL). */
           shim_gl_present(&glc);
-          if (frames % 300 == 0)
+          if (frames % 120 == 0)
             fprintf(stderr, "[render] frames=%ld cont=%d\n", frames, cont);
           if (!cont) { fprintf(stderr, "[render] QuitRequested -> sai\n"); break; }
+          if (max_frames && frames >= max_frames) {
+            fprintf(stderr, "[render] teto de frames (%ld) atingido -> sai\n", max_frames);
+            break;
+          }
+          if (max_sec && (now_ms_bridge() - t_start) / 1000 >= max_sec) {
+            fprintf(stderr, "[render] teto de tempo (%lld s) atingido -> sai\n",
+                    (long long)max_sec);
+            break;
+          }
+          if (shim_input_quit_requested(input_ctx)) {
+            fprintf(stderr, "[render] saida pedida pelo gamepad (START+SELECT / quit)\n");
+            break;
+          }
           usleep(16000);   /* ~60fps; gamepad/teclado via input thread */
         }
         fprintf(stderr, "[render] loop encerrado apos %ld frames\n", frames);

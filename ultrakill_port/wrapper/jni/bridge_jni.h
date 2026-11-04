@@ -360,6 +360,50 @@ JavaVM *shim_jni_get_vm(void);
 JNIEnv *shim_jni_new_env_for_thread(const char *thread_name);
 void    shim_jni_install(void);          /* setenv ULTRAKILL_FAKE_JVM=1 etc */
 
+/* =====================================================================
+ * OBJETOS DE EVENTO VIRTUAIS (android.view.InputEvent)
+ * =====================================================================
+ * EVIDENCIA (tools/dumpelf.py + log do device): o libunity.so deste build
+ * NAO importa nenhum AInputQueue_* - ele recebe input SOMENTE pelo native
+ * registrado `nativeInjectEvent (Landroid/view/InputEvent;)Z`. O caminho e:
+ * nos criamos um objeto Java FALSO de android/view/MotionEvent (ou
+ * KeyEvent), entregamos o jobject ao nativeInjectEvent, e a mini-JVM
+ * responde os Call*Method que o C++ do Unity faz em cima dele
+ * (getAction/getX/getPointerCount/...).
+ *
+ * O envelope (jobject) e PERMANENTE: o chamador mutua o struct
+ * shim_jni_event e chama nativeInjectEvent de novo. Nada de alocar por
+ * evento (o pool do shim nunca libera). */
+#define SHIM_JNI_MAX_POINTERS 8
+#define SHIM_JNI_MAX_AXES     48
+
+typedef struct shim_jni_pointer {
+  int32_t id;
+  float   x, y;
+  float   pressure, size;
+  int32_t tool_type;
+} shim_jni_pointer;
+
+typedef struct shim_jni_event {
+  int      is_key;               /* 1 = KeyEvent, 0 = MotionEvent */
+  int32_t  action;               /* AKEY_EVENT_ACTION_* / AMOTION_EVENT_ACTION_*
+                                  * (com o index do ponteiro ja deslocado <<8,
+                                  * exatamente como o Android entrega) */
+  int64_t  down_ms, event_ms;
+  int32_t  device_id, source, flags, meta_state;
+  int32_t  key_code, key_scan, key_repeat;    /* KeyEvent */
+  int      n_ptrs;
+  shim_jni_pointer ptr[SHIM_JNI_MAX_POINTERS];
+  float    axis[SHIM_JNI_MAX_AXES];           /* por AMOTION_EVENT_AXIS_* */
+} shim_jni_event;
+
+/* Cria (uma vez) um jobject que e uma visao do 'ev'. NAO libere. */
+jobject shim_jni_make_event(shim_jni_event *ev, int is_key);
+/* Devolve o struct associado, ou NULL se 'o' nao e um evento nosso. */
+shim_jni_event *shim_jni_event_data(jobject o);
+/* 1 = sim, o objeto e um dos nossos eventos. */
+int shim_jni_is_event(jobject o);
+
 #ifdef __cplusplus
 }
 #endif

@@ -1,0 +1,608 @@
+ULTRAKILL - O QUE MUDOU NESSA COMPILACAO (run #99 do Actions)
+============================================================
+
+>>> DIAGNOSTICO DO BOOT REAL NO TSP (ultrakill.log + unity_probe.log de 04/11 08:19) <<<
+--------------------------------------------------------------------------------
+O port RODU no console (o entrypoint funcionou, o launcher funcionou) e o
+BENDER foi mais longe do que nunca. Lendo as duas pistas duras do log:
+
+  1) [BENDER_PAD][STATUS] pack=UnityStreamingAssetsPack status=NOT_INSTALLED(8)
+     source=missing path=(missing)
+     -> o probe so declara o pack como instalado se EXISTIR no disco uma pasta
+        com ficheiro dentro (funcao bender_pad_pack_path_2749, politica
+        'real-files-only'). Ele aceita, nesta ordem:
+          a) <app>/unity_payload/asset_packs/<pack>/assets/
+          b) <app>/unity_payload/assets/StreamingAssets/            (ou bin/Data/StreamingAssets)
+          c) <app>/unity_payload/assets/Bundles/
+        Nenhuma existia neste payload (o APK poe o Addressables em
+        assets/aa/, servido pelo AAssetManager, nao em StreamingAssets).
+     -> Corrigido SEM recompilar: criadas as pastas (a) e (b) com conteudo
+        pequeno (catalog.json + settings.json + marker). Os bundles de 470 MB
+        ficam ONDE JA ESTAO, nao foram duplicados.
+
+  2) [UNITY_PROBE] nativeRender first-frame begin fn=0x...  ->  e para ai:
+     [BENDER_RENDER_WATCHDOG][IDLE_STALL] idle=20s serial=661
+        checkpoint="sync wait kind=cond" guest=... caller=0x7f75f708ac
+        module=libunity.so offset=0x2e38ac  action=observe-only-contin
+     -> o NAO e crash: a thread de render esta ESPERANDO uma condicao dentro do
+        libunity, com o watchdog de idle em 20 s. Coincide com (1): o Unity do
+        repack mobile consulta o estado do AssetPack
+        (UnityCoreAssetPacksStatusCallbacks.nativeStatusQueryResult, que o probe
+        capturou) e PARA no wait ate receber 'available'. Com o pack agora
+        instalado no disco, este wait deve atravessar.
+     -> Por seguranca, os watchdogs do render passaram a exportaveis e com
+        folga real no TSP: BENDER_RENDER_IDLE_WATCHDOG_SEC=90 (era 20),
+        ABSOLUTE=900, EXTEND=120, e o timeout externo virou ABSOLUTE+300. Assim
+        o proximo log diz sem duvida se era so DEVAGAR (SD frio + catalog) ou
+        se era o wait do pack.
+
+Tambem confirmado pelo log desta rodada (ja OK, nao mexer):
+  BOX=tsp GPU=pvr painel=1280x720 | LOADER=bender | GPU backend=pvr
+  AUDIO: libOpenSLES ... (bridge OpenSL->SDL2 novo)
+  INPUT: mouse=1 combo=start+r1 clique=b stick=right
+  FPS alvo: 30 (frame US=33333) | pad TSP A/B pelo rotulo fisico aplicado
+  devfreq: 0 ajustes (o /sys do TSP nao expoe min/max gravaveis p/ este user)
+
+PROXIMA RODADA: so dar Play de novo e me avisar. O que eu procuro no log novo:
+  [BENDER_PAD][STATUS] ... status=COMPLETED / source=extracted-pack
+  [UNITY_PROBE][RENDER_STAGE] passando de 'first-frame begin'
+  [BENDER_EGL][...] / [BENDER_SDL][...] com janela real (mali)
+Se ainda travar no mesmo offset, o proximo passo e no probe: responder
+available=1 ao nativeStatusQueryResult sem depender de disco (uma linha no
+bender/unity_probe.c) - aÍ sim precisa do build do CI.
+
+>>> ESTADO DO CARTAO AGORA (d:/roms/ports = SD do TrimUI Smart Pro) <<<
+--------------------------------------------------------------------------------
+Esta pasta E o SD. O que ja esta aplicado nele, sem precisar de build novo:
+
+  1. ultrakill.sh (raiz de /roms/ports) + entrada no gamelist.xml
+     -> o port APARECE na lista 'ports' e da launch (antes nao existia entry
+        point nenhum: e por isso que "nao abria" e nao havia log).
+  2. ultrakill/libs/arm64/libOpenSLES.so = bridge OpenSL ES -> SDL2 de verdade
+     (24136 bytes, copia do audio_bridge/, que e compilado do
+     bender/bender_opensles.c). O stub no-op de 8488 bytes ficou em
+     libOpenSLES.so.stub-noop.bak. Este e o fix do SOM e, muito provavelmente,
+     do SIGBUS dentro do nativeResume (o stub nao tinha vtable).
+  3. ultrakill_start.sh / .bin (rev -L): detecta o box, aplica a receita do
+     spruceOS (SDL_VIDEODRIVER=mali + /mnt/SDCARD/spruce/flip/lib +
+     /usr/trimui/lib + SDL_AUDIODRIVER=alsa), trava devfreq/CPU e restaura ao
+     sair, ancora o display (flock), conserta o pad do TSP (a:b1,b:b0 num
+     gamecontrollerdb privado), poe HOME/persistencia dentro do port
+     (ultrakill/home), roda tools/tune_prefs.py (volume do jogo estava 0) e
+     escreve no fim do log um bloco '================= RESUMO DO BOOT ================='.
+  4. ultrakill.conf: ULTRAKILL_TARGET_FPS=30 (interno 640x360 + pacing de
+     33333 us + qualidade 0), ULTRAKILL_NO_SOUND=0, loader=bender com bridge de
+     fallback, e todos os knobs do mouse documentados.
+  5. data/files/Preferences/Prefs.json: allVolume/musicVolume 0.0 -> 1.0 e
+     LocalPrefs.json frameRateLimit 5 -> 60, fullscreen -> true
+     (backup .bak-ark em cada um).
+
+O mouse virtual JA funciona hoje, no loader bender, com o esquema antigo:
+  L1+R1 (faz as vezes de FN) e depois D-para-BAIXO = liga/desliga mouse
+  R3 = clique | analogico direito e D-para = mueve o ponteiro
+  L1+R1 + D-para-CIMA = teclado virtual | L1+R1 + D-para-DIREITA = pad->teclado
+O atalho que voce pediu (START+R1 liga, B clica) esta implementado no codigo do
+probe e no bridge, mas PRECISA do build do CI para virar binario.
+
+Depois de rodar no console, me manda (ou eu le daqui):
+  ultrakill/ultrakill.log        (launcher: qual backend/GL/audio/mouse)
+  ultrakill/player.log           (Unity, se o bridge chegou la)
+  ultrakill/unity_probe.log      (probe/BENDER)
+  ultrakill/ULTRAKILL-CRASH.txt  (so se morreu por sinal)
+
+>>> REV -L (2026-11-03): REVISAO GERAL DO CODIGO DO PORT (TRIMUI SMART PRO) <<<
+--------------------------------------------------------------------------------
+Revisei O PORT INTEIRO (launcher + wrapper C + payload + embalagem) e achei 6
+defeitos concretos, cada um com evidencia (log do cartao, ELF do libunity.so,
+ou arquivo no SD). Do mais grave ao menos grave:
+
+1) O PORT NAO APARECIA/NEM ABRIA porque NAO EXISTIA entry point.
+   - ultrakill.txt diz button="ultrakill.sh", mas nao havia ultrakill.sh em
+     /roms/ports (so ultrakill/ultrakill_start.sh, DENTRO da pasta), e o
+     gamelist.xml tinha 47 jogos e NENHUM ULTRAKILL.
+   - por isso o unico log no SD era ultrakill.log.prev (de 07/11/2025, da R36S):
+     nada foi executado no TSP, entao nao existia log novo para eu ler.
+   - CORRIGIDO: criado /roms/ports/ultrakill.sh (entry POSIX, padrao dos ports
+     desta caixa: source PortMaster/control.txt + get_controls +
+     SDL_GAMECONTROLLERCONFIG + /dev/tty0 + exec bash ultrakill_start.sh) e
+     entrada no gamelist.xml.
+
+2) AUDIO: o libOpenSLES.so do port era um stub no-op SEM VTABLE -> crash.
+   - o Unity 2019.4 embarca o FMOD DENTRO do libunity.so (strings:
+     '../android/src/fmod_output_opensl.cpp', 'FMOD OpenSL ES Output',
+     'libOpenSLES.so', 'slCreateEngine', 'SL_IID_ENGINE', 'SL_IID_PLAY',
+     'SL_IID_BUFFERQUEUE', 'SL_IID_ANDROIDSIMPLEBUFFERQUEUE',
+     'SL_IID_ANDROIDCONFIGURATION', 'SL_IID_RECORD', 'disableOpenSL'), e como
+     libunity.so NAO importa NENHUM simbolo sl* (tools/dumpelf.py), o audio e
+     carregado em runtime com dlopen/dlsym.
+   - o stub antigo devolvia um 'objeto' = struct {estado, refs} e exportava
+     slRealizeObject/slGetInterface, que NAO EXISTEM no OpenSL ES real. OpenSL
+     e COM-like de 2 niveis: (*engineObject)->Realize(engineObject, ...). Com o
+     nosso fake, o FMOD leu o campo 'state' como ponteiro de funcao e saltou
+     para lixo - bate com o SIGBUS 'dentro do nativeResume, sem nenhuma linha
+     de [guard]' do log, e com o corte do BENDER em AudioManager.getDevices.
+   - CORRIGIDO: wrapper/stubs/opensles_stub.c agora e um bridge OpenSL ES ->
+     SDL2 real (engine/output mix/player/play/AndroidSimpleBufferQueue com
+     vtables na ordem do header Khronos; Enqueue -> SDL_QueueAudio; um pump
+     thread dispara o callback do FMOD quando o buffer e consumido; sem
+     dispositivo, modo 'relogio' - roda mudo em vez de travar). ABI conferida
+     contra o bridge embarcado audio_bridge/libOpenSLES.so (tools/dumpelf.py
+     mostra STT_OBJECT size=8 SL_IID_* - mesma forma que o FMOD espera).
+   - TAMBEM: o proprio jogo estava com volume ZERADO no SEU arquivo de
+     opcoes: data/files/Preferences/Prefs.json tinha allVolume=0.0 e
+     musicVolume=0.0 (e LocalPrefs.json frameRateLimit=5, fullscreen=false).
+     Ja corrigido na pasta; o launcher roda tools/tune_prefs.py a cada boot
+     (backup Prefs.json.bak-ark).
+
+3) INPUT: o bridge empilhava eventos numa AInputQueue que NINGUEM le.
+   - evidencia: libunity.so importa so ALooper/ANativeWindow/ASensor/__android
+     e NENHUM AInputQueue_*/AMotionEvent_*. A unica porta de input deste build
+     e o native que o proprio UnityPlayer registra:
+       nativeInjectEvent (Landroid/view/InputEvent;)Z
+     (listado no log do cartao, ao lado de 'nativeInjectEvent' na .rodata).
+   - CORRIGIDO: bridge_input.c monta objetos Java FALSOS de
+     android/view/{Key,Motion}Event, a mini-JVM responde os
+     Call{Int,Long,Float,Boolean,Void}Method que o C++ do Unity faz em cima
+     deles (getAction/getActionMasked/getActionIndex/getPointerCount/
+     getPointerId/getX/getY/getRawX/getRawY/getPressure/getSize/getToolType/
+     getAxisValue/getEventTime/getDownTime/getDeviceId/getSource/getMetaState/
+     getKeyCode/getScanCode/getRepeatCount/getHistorySize/recycle/...), e
+     chama nativeInjectEvent. A fila AInputQueue antiga continua (custo zero)
+     para builds baseados em NativeActivity.
+   - BUG DE JNI QUE IMPEDIA ISTO: a vtable do JNIEnv tinha slots NULL em
+     CallByte/Char/Short/Long/Float/Double* e em todos os CallNonvirtual*
+     (NULL = saltar para 0x0 = SIGSEGV). getX/getY do MotionEvent sao
+     CallFloatMethod - exatamente o slot NULL. CORRIGIDO: vtable completa
+     (implementado + variadic V + vetor A para cada tipo).
+
+4) MOUSE VIRTUAL (pedido: START+R1 liga/desliga, B e o clique).
+   - implementado em wrapper/bridge/bridge_input.c, ajustavel pelo
+     ultrakill.conf sem recompilar:
+       ULTRAKILL_MOUSE=1                     liga o recurso
+       ULTRAKILL_MOUSE_TOGGLE=start+r1       combo liga/desliga
+       ULTRAKILL_MOUSE_CLICK=b               botao de clique
+       ULTRAKILL_MOUSE_STICK=right|left|dpad|none
+       ULTRAKILL_MOUSE_SPEED=1100            px/s na deflexao total
+       ULTRAKILL_MOUSE_DEADZONE=5000
+       ULTRAKILL_MOUSE_MODE=touch|mouse      dedo (PADRAO - e o que a UI
+                                             mobile do ULTRAKILL le, e o Unity
+                                             emula Input.mousePosition a partir
+                                             do toque) ou mouse Android
+                                             (HOVER_MOVE + BUTTON_DOWN/UP)
+   - detalhes que fazem funcionar de verdade:
+     * START e R1 ficam BUFFERIZADOS 400 ms: se os dois caem nesse prazo,
+       vira toggle e NENHUM dos dois e entregue ao jogo (senao cada toggle
+       abriria o PAUSE em cima).
+     * com o mouse ligado o B nao vai ao jogo (vira clique) e o stick do
+       ponteiro tambem nao; o OUTRO stick continua sendo movimento.
+     * SELECT+START 1 s = sair do port (o bridge pede quit). NAO ligamos
+       gptokeyb no entry .sh para nao criar pad/teclado fantasma por cima.
+     * o log imprime '[input] >> MOUSE VIRTUAL LIGADO/DESLIGADO' e
+       '>> nativeInjectEvent = 0x...' - da para confirmar pelos logs.
+
+5) GPU: o launcher forçava a pilha da R36S (blob Mali + Mesa surfaceless +
+   readback glReadPixels -> KMS/fb0) dentro de um TrimUI Smart Pro.
+   - ultrakill.conf vinha ULTRAKILL_GL_BACKEND=mali; no TSP nao existe
+     /dev/mali0 nem graphics/libMali.so, entao o launcher caia em 'swrast',
+     que exporta EGL_PLATFORM=surfaceless + ULTRAKILL_NO_SDL_GL +
+     ULTRAKILL_KMS_DIRECT + ULTRAKILL_SKIP_FOCUS - remendo de Mesa por
+     software numa caixa que tem PowerVR GE8300 de verdade.
+   - CORRIGIDO: deteccao em runtime ('DETECTA CONSOLE': /dev/mali0 -> r36s/mali;
+     senao tsp/pvr), backend novo 'pvr' que so usa o EGL/GLES do SISTEMA, nao
+     assume CRTC por dumb buffer nem escreve /dev/fb0; e no wrapper o bridge_gl
+     DEIXA O SDL criar contexto + window surface (SDL_GL_CreateContext ->
+     eglGetCurrentDisplay/Surface), solta o contexto (SDL_GL_MakeCurrent NULL)
+     e entrega ESSA surface ao Unity - assim o eglSwapBuffers do proprio Unity
+     e o page flip no painel. Sem isso, cai no caminho antigo automaticamente.
+   - ULTRAKILL_LOADER agora default 'bridge' no TSP (bender segue default na
+     R36S, onde ele renderizou 351 frames). Resolucao interna default
+     640x360 no painel 1280x720 do TSP (antes 480x360 fixo da R36S).
+
+6) EMBALAGEM/DIAGNOSTICO: log rotaciona (ultrakill.log -> .prev, e o
+   player.log tambem), tela de progresso no caminho bridge, bloco final
+   '================= RESUMO DO BOOT =================' (box/loader/GPU/audio/
+   mouse/exit/frames/sinal), tunning de memoria p/ 1 GB (MALLOC_ARENA_MAX=2
+   etc, igual aos ports Unity que rodam nesta caixa), e o launcher detecta o
+   libOpenSLES do SD sendo o stub velho (e nesse caso poe audio_bridge/ na
+   frente do LD_LIBRARY_PATH). NOVAS FERRAMENTAS: tools/dumpelf.py (imports/
+   exports/strings de ELF - foi o que provou os itens 2 e 3), tools/ccheck.py
+   (chec parentese/includes/simbolos dos alvos do CMakeLists sem compilador),
+   tools/tune_prefs.py (volumes/FPS do jogo).
+
+>>> PRE-REQUISITO PARA TESTAR: O WRAPPER PRECISA SER RECOMPILADO <<<
+--------------------------------------------------------------------------------
+gamedata/bin/ultrakill e libs/arm64/*.so no SD sao da build ANTIGA; nada dos
+itens 2/3/4/5 funciona sem o build novo, e sua maquina e Windows sem
+gcc/cmake/WSL. O caminho e o GitHub Actions (o workflow foi consertado para
+aceitar a pasta do port na raiz do repo E a subpasta ultrakill/):
+
+  1. repo no GitHub com o CONTEUDO desta pasta ultrakill/ na raiz (precisa
+     levar .github/workflows/build-wrapper.yml). O payload de 500 MB NAO e
+     necessario para o build - o CI so usa wrapper/.
+  2. Actions -> 'build wrapper (arm64)' -> Run workflow (runner arm64, ~2 min).
+  3. baixe o artifact 'ultrakill-arm64-binaries' e EXTRAIA POR CIMA de
+     /roms/ports/ultrakill/ (substitui libs/arm64/*.so* e gamedata/bin/ultrakill).
+     O proprio CI confere o ABI novo: nm -D do libOpenSLES.so procurando os
+     SL_IID_* e nm do bridge procurando shim_input_set_unity_inject e
+     shim_jni_make_event - se passou, os binarios tem a revisao.
+  4. copie tambem a RAIZ: /roms/ports/ultrakill.sh + gamelist.xml novo.
+     Ejete o cartao direito (exFAT sem journal; puxar sem eject ja fez SUMIR
+     dois logs desta pasta).
+
+COMO LER O LOG DEPOIS (ultrakill/ultrakill.log):
+  ">> LAUNCHER_REV 2026-11-03-L"           -> launcher novo rodou
+  ">> CONSOLE detectado: BOX=tsp GPU=pvr"  -> box certo
+  ">> LOADER selecionado: bridge"
+  ">> AUDIO: libOpenSLES usada = ...novo)"
+  ">> INPUT: mouse=1 combo=start+r1 clique=b stick=right ..."
+  "bridge_gl: ok 640x360 ... present=eglSwapBuffers do Unity na window surface do SDL"
+  ">> nativeInjectEvent = 0x... (input ATIVO via JNI)"
+  "[input] mouse virtual: enable=1 ..."  e depois "MOUSE VIRTUAL LIGADO"
+  "chamando nativeResume()" -> "resume voltou" (se ainda morrer AQUI, o
+     ultrakill-crash.log traz pc/si_addr/modulo+OFFSET; com o libunity.so do
+     port em maos, offset vira funcao com addr2line)
+  "[render] frames=120 cont=1" subindo -> imagem
+  ultimo bloco: "================= RESUMO DO BOOT ================="
+
+O que ainda NAO posso garantir (honesto, sem o device na mao):
+  * se o DDK PowerVR do SpruceOS aceita a window surface GBM do SDL kmsdrm (se
+     der EGL_BAD_NATIVE_WINDOW no Unity, o shim cai no pbuffer antigo e o log
+     diz - ai religamos ULTRAKILL_NO_SDL_GL=1 + readback, lento, mas mostra se
+     o resto do boot esta certo);
+  * todos os metodos JNI que o nativeInjectEvent chama alem dos que mapeei
+     (aparecem como 'JVM-event: metodo nao tratado em android/view/...: NOME';
+     e so adicionar na tabela ev_get_int/ev_get_float de bridge_jni.c);
+  * se libil2cpp.so/libunity.so do SD batem com o global-metadata.dat - o
+     base.apk sumiu da pasta, entao o self-heal do launcher nao tem com o que
+     comparar. Se aparecer 'referenced script is missing' de novo, e isso.
+
+>>> PIVO DE HARDWARE (2026-11-03-K): este port AGORA roda no TRIMUI SMART PRO <<<
+--------------------------------------------------------------------------------
+CONSOLE REAL = TRIMUI SMART PRO (TSP), firmware SpruceOS, userspace 64-bit
+(aarch64), GPU PowerVR GE8300. O port foi ESCRITO pro TSP; antes estava no
+sd do R36S (ai o metadata dizia rk3326 e tudo que ajustamos de Mali/GBM/KMS/
+/dev/fb0 era para o HARDWARE ERRADO).
+
+NOVO PADRAO = loader 'bridge' (wrapper SDL nativo, codigo aberto, mira PowerVR):
+  - binario: gamedata/bin/ultrakill (aarch64) + libs/arm64/*.so (shims)
+  - selecionado por ULTRAKILL_LOADER=bridge no ultrakill.conf
+  - PULA o BENDER inteiro (unity_probe), entao GL_BACKEND=mali / libMali.so /
+    /dev/fb0 / GBM-KMS NAO sao usados aqui. O bridge usa o libEGL do SISTEMA
+    (PowerVR) via libs/arm64/libEGL.so shim + PVRSRVHINTS.
+Para voltar ao loader fechado BENDER (p.ex. testar noutro box): ULTRAKILL_LOADER=bender
+
+COMO RODAR NO TSP: descompacte ultrakill.zip em /roms/ports/ultrakill, abra no
+PortMaster (Play). O bridge escreve dois logs que me interessam p/ ajustar:
+  - /roms/ports/ultrakill/ultrakill.log  (launcher: qual loader, SDL drivers)
+  - /roms/ports/ultrakill/player.log     (o proprio Unity/bridge: JNI, shaders)
+AVISO honesto: o bridge tem JNI ralo e shader GOT-patch 'pendente' (ver
+wrapper/README.md); pode nao bootar 100%. Diferente do BENDER, aqui da pra
+CORRIGIR no C se precisar. Manda os dois logs que eu ajusto.
+
+>>> HISTORICO R36S/Mali abaixo ficou DESATUALIZADO (era do outro console) <<<
+
+
+>>> ATUALIZACAO (boot 2025-11-07): TROCA DA PILHA DE GPU <<<
+------------------------------------------------------------
+O ultimo log nao morria mais em SIGBUS no nativeResume: o BENDER chegou ate
+nativeRender mas o GPU WATCHDOG cortou em 15s com
+  [BENDER_GPU_WATCHDOG][TIMEOUT] stage=eglInitialize ... reason=gpu-bringup-blocked
+  >> BENDER exit 124
+CAUSA REAL (provada pelo log): o launcher forcava a pilha MESA/llvmpipe
+SOFTWARE com EGL_PLATFORM=surfaceless. Essa pilha precisa abrir
+/dev/dri/renderD128, que e do grupo "render" e o user "ark" (uid 1002) NAO
+tem -> "failed to open /dev/dri/renderD128: Permission denied" -> cai em
+surfaceless swrast -> os eglChooseConfig/eglGetConfigAttrib do Unity voltam
+EGL_NOT_INITIALIZED e o eglInitialize nunca completa.
+
+CORRIGIDO AGORA: o port passou a usar o MESMO caminho de GPU dos ports que
+FUNCIONAM neste cartao (cuphead roda a ~30 FPS): o blob Mali nativo
+(libmali-bifrost-g31-...-gbm) servindo EGL/GLES/gbm, com SDL_VIDEODRIVER=kmsdrm
+e SDL_VIDEO_EGL_DRIVER/GL_DRIVER apontando p/ ele. O GBM usa /dev/dri/card0
+(grupo "video", que o ark TEM acesso), entao nao esbarra no renderD128.
+  - O blob foi copiado para ultrakill/graphics/libMali.so (auto-contido).
+  - Backend novo por PADRAO. Para voltar a pilha software antiga:
+      echo 'ULTRAKILL_GL_BACKEND=swrast' > ultrakill/ultrakill.conf
+  - Ajustes no mesmo ultrakill.conf: BENDER_GPU_WATCHDOG_SEC=60 (mais tempo de
+      bring-up), INT_W/INT_H (resolucao interna), SDL_VIDEODRIVER=fbcon (se o
+      kmsdrm nao assumir a tela).
+SINAIS DE SUCESSO no ultrakill.log / unity_probe.log:
+  ">> BENDER GL: backend=mali blob=.../libMali.so ..."
+  "[BENDER_SDL][WINDOW][OK]"  (antes: "Can't window GBM/EGL surfaces")
+  "[BENDER_EGL][...INITIALIZE...] rc=1" sem EGL_NOT_INITIALIZED em loop
+  ">> loop nativeRender" e frames subindo (sem watchdog timeout / exit 124)
+
+------------------------------------------------------------
+(Historico da run #99, mantido para referencia)
+
+O que o último boot mostrou (ULTRAKILL-CRASH.txt / ultrakill.log):
+  OK  : contexto EGL 1.4 Mesa 19.2.8 ES 3.2 criado, Pbuffer 480x360,
+        KMS scanout 640x480 assumido, card0 e fb0 escreviveis (ark esta
+        no grupo video), initJni voltou, guard re-armado
+  MORRE: "chamando nativeResume()" -> Bus error (exit 135 = SIGBUS), sem
+        nenhuma linha de [guard] (o Unity repoe os handlers dele na
+        thread de render depois de nos armarmos os nossos)
+
+Novo nesta compila8ao (89832 bytes de bridge):
+  - watchdog do guard: re-escreve os sigaction a cada 40 ms, entao o
+    proximo crash IMPRIME pc / si_addr / modulo + offset no arquivo
+  - ultrakill-crash.log no SD: escrito com open/write puros (escapa da
+    redirecao de stderr que o Unity faz)
+  - BISECT AUTOMATICO: se morrer por sinal, o launcher roda de novo
+    TOTALMENTE headless (sem KMS, sem fb0, sem renderer). O veredito sai
+    no log e diz se o sinal vem do nosso caminho de apresentacao ou do
+    Unity a ler o payload.
+
+Sobre o APK (checado byte a byte, sem chute):
+  - global-metadata.dat, data.unity3d, catalog.json e os 3 .bundle do
+    cartao sao IDENTICOS ao ultrakill_port/ULTRADROID.apk -> nada
+    truncado, nada corrompido
+  - libunity/libil2cpp/libmain so diferem em 297/2481/22 bytes, que sao
+    os renomes de DT_NEEDED/.gnu.version feitos pelas ferramentas daqui
+  - LIMITACAO REAL do APK: o ULTRADROID.apk traz conteudo
+    StandaloneWindows64 (shaders DXBC); o payload em uso e o re-export
+    em que tools/prepare_payload.py substitui cada blob DXBC por um stub
+    ESSL 300 (magenta). Andar da, mas o visual nao e o original
+  - o cartao esta com ~397 MB livres (um re-export completo nao cabe)
+
+Arquivos no cartao agora (build do GitHub Actions, run #99):
+  gamedata/bin/ultrakill        89832 bytes   (bridge com watchdog)
+  libs/arm64/libEGL.so          37136 bytes   (shim; copiado tambem como
+  libs/arm64/libEGL.so.1                       libEGL.so.1 - TEM que bater)
+  tools/egltest                 diagnostico EGL sem SDL
+  ultrakill_start.bin           launcher com sondas, forense e bisect
+  wrapper/                      fontes ATUALIZADOS (batem com o binario)
+
+Correcoes (causa provavel do SIGSEGV em nativeResume):
+  1. O shim devolvia NULL para TODO eglGetProcAddress("...") - o dlsym
+     procurava o simbolo "eglGetProcAddress_real" (que nao existe no driver).
+     O Unity pega ponteiro de funcao GL por eglGetProcAddress, achava NULL e
+     chamava no vazio. Agora encaminha para o eglGetProcAddress REAL, e se
+     ainda assim falhar tenta dlsym na libGLESv2 / no processo. Mesma bug
+     existia em eglGetPlatformDisplay.
+  2. O Unity nunca recebeu uma janela Android de verdade, entao
+     eglCreateWindowSurface(win) chegava com NULL/lixo. Agora o shim cria um
+     PBUFFER real com o config que o proprio Unity pediu e devolve.
+  3. Guard de SIGSEGV re-armado depois de initJni (o crash reporter do Unity
+     roubava o handler; por isso o log parava em "chamando nativeResume()"
+     sem imprimir nada).
+  4. Present com fallback novo: KMS (card0) -> /dev/fb0 -> renderer SDL.
+     O renderer SDL so e tentado com backend de video real, porque com
+     driver offscreen ele SEGFAULTA nessa SDL. Se nenhum funcionar o port
+     roda HEADLESS (sem imagem, mas com log) - melhor que tela preta.
+  5. Resolucao interna agora e 480x360 de verdade (antes o launcher passava
+     480x270 so como argumento do Unity e o bridge abria 1280x720 = 6x mais
+     pixeles em llvmpipe por CPU).
+
+COMO TESTAR
+-----------
+1. Boote o cartao na R36S. Ports -> ultrakill.
+2. Espere o jogo rodar ou morrer (o launcher corta em 900 s no maximo).
+3. Desligue, coloque o cartao no PC e me avise. Eu leio:
+     /ports/ultrakill/ultrakill-crash.log     <- pc/si_addr + modulo + OFFSET
+     /ports/ultrakill/ULTRAKILL-CRASH.txt      <- forense com o veredito do bisect
+     /ports/ultrakill/ultrakill.log            <- log completo do run
+     /ports/ultrakill/player.log               <- log do proprio Unity (se nasceu)
+   Com o OFFSET eu rodo objdump/addr2line aqui no PC contra o MESMO
+   libunity.so/libil2cpp.so do cartao (tenho eles) e digo a funcao exata.
+
+AJUSTES SEM RECOMPILAR (crie esta pasta/arquivo no cartao)
+----------------------------------------------------------
+Arquivo: ports/ultrakill/ultrakill.conf   (texto puro, uma linha por opcao)
+  INT_W=400                largura interna (menor = mais FPS)
+  INT_H=300                altura interna
+  KMS_MODE=off             NUNCA assume o CRTC (use se a tela ficar preta
+                           depois de sair do jogo; ai so fb0/SDL)
+  ULTRAKILL_NO_FB=1        nao tenta /dev/fb0
+O arquivo e lido ANTES das sondas, entao o que voce poe ali vence o padrao.
+
+SINAIS DE QUE FUNCIONOU (no ultrakill.log)
+------------------------------------------
+  "shim/egl: eglCreateWindowSurface(nao-ANW ...) -> PBUFFER real"  (antes: nada)
+  "bridge_gl: present = KMS scanout (card0)"  ou  "present = /dev/fb0"
+  "resume voltou"
+  ">> loop nativeRender comecando"
+  "[render] frames=300 cont=1"
+
+O log do ultimo boot anterior esta guardado em ultrakill.log.prev (crash
+antigo, SIGSEGV em nativeResume, exit 139).
+
+AJUSTES SO DE VIDEO (2025-11-03) - NAO MEXEM NA LOGICA DO JOGO
+--------------------------------------------------------------
+O jogo em si (libil2cpp.so / global-metadata.dat) e compilado IL2CPP e nao e
+editavel; todo o acerto de video se faz pela superficie de config que o loader
+BENDER e o proprio Unity ja respeitam (PlayerPrefs + env do probe). O launcher
+agora liga, por padrao, tres coisas so de render para caber no Mali G31 da R36S:
+  - Render 75%: desenha em 480x360 e sobe p/ 640x480 (muito mais FPS).
+        desliga: ULTRAKILL_RENDER_SCALE_75=0  (no ultrakill.conf)
+  - Pacing auto60: limita suave em ~60 FPS.
+        troque:  ULTRAKILL_FRAME_PACING=compat | auto60 | uncapped
+  - Pula intro FMV: nao decodifica os videos de abertura.
+        mantem:  ULTRAKILL_SKIP_INTRO=0
+  - Qualidade minima forcada: escreve UnityGraphicsQuality=0 no PlayerPrefs, ai
+        o Unity abre no preset mais baixo e usa as variantes de shader mais
+        baratas (sombras/post menores). NAO edita shader compilado.
+        desliga: ULTRAKILL_FORCE_LOW_QUALITY=0
+Tudo isso pode ir em ultrakill.conf (uma linha por opcao). A linha
+  ">> BENDER VIDEO: render_scale75=... pacing=... intro_skip=... egl=..."
+no ultrakill.log confirma o que foi aplicado naquele boot.
+
+DIAGNOSTICO DO BOOT 2025-11-03 (exit 133 / EGL nao inicializa)
+--------------------------------------------------------------
+Aquele boot ja NAO e mais o erro de software (renderD128). O erro novo e:
+  file /dev/mali0 is not of a compatible version (user 10.6, kernel 11.7)
+  Failed creating base context during opening of kernel driver.
+  [BENDER_SDL][WINDOW][FAIL] Can't load EGL/GL library on window creation.
+  [BENDER_EGL_RAW][DEFAULT] ... initialize=0 err=0x3001  >> BENDER exit 133
+CAUSA: o launcher acabou carregando o blob Mali do SISTEMA
+(/usr/lib/aarch64-linux-gnu/libmali-bifrost-g31-rxp0-wayland-gbm.so), que e
+DDI r10.6, mas o kernel mali_kbase deste firmware e r11.7 -> /dev/mali0 recusa.
+O blob CERTO e o EMPACOTADO nos ports: graphics/libMali.so (o MESMO que o
+cuphead usa e com o qual roda a ~30 FPS, sem nenhum erro de /dev/mali0).
+
+O QUE FAZER (2 passos, pela ordem):
+1) RESINCRONIZAR os arquivos atualizados p/ o cartao. O log daquele teste
+   saiu de um ultrakill_start.bin MAIS ANTIGO que este da pasta (ele ainda
+   tinha o trecho "usando como ULTRAKILL_REAL_LIBEGL: /usr/lib/..." e o echo
+   curto "render_scale75=1"). Copie de novo a pasta ultrakill/ toda p/
+   /roms/ports/ultrakill (e ejecte direito, nao puxe do nada).
+2) GARANTIR o blob bom: tem que existir
+   /roms/ports/ultrakill/graphics/libMali.so  (ja esta nesta pasta; se o seu
+   cartao nao tinha, copie la de cuphead/graphics/libMali.so). O launcher agora
+   SO usa esse blob empacotado e NUNCA mais o do sistema (a menos que voce
+   ponga ULTRAKILL_GL_ALLOW_SYSTEM_MALI=1, o que deve voltar a dar /dev/mali0).
+
+ASSINATURAS DE SUCESSO no novo ultrakill.log (mali bom):
+  "GPU backend = mali (blob nativo): .../graphics/libMali.so"
+  ">> BENDER GL: backend=mali blob=.../graphics/libMali.so real_egl=.../graphics/libMali.so"
+  "[BENDER_SDL][LOAD][OK] ... SDL_VIDEO_EGL_DRIVER=/.../graphics/libMali.so"  (antes: (unset))
+  ausente: "not of a compatible version" / "Failed creating base context"
+  presente: "[BENDER_EGL]... initialize=1" e ">> loop nativeRender" com frames subindo
+
+DIAGNOSTICO DO BOOT 2025-11-07 (Mali OK, porem TELA PRETA que "nao acaba")
+--------------------------------------------------------------------------
+Depois do CRLF corrigido, o Mali subiu de verdade (sem mais erro de /dev/mali0)
+e o loop rodou 351 frames - mas a tela ficou PRETA e voce teve que reiniciar.
+Causa raiz AGORA e de PRESENT, nao de driver:
+  [BENDER_FRAME_LOOP][HOST_PRESENT] frame=N ... guest_swaps=0
+        reason=nativeRender-no-eglSwapBuffers policy=bootstrap-only
+Ou seja: o ULTRAKILL (Unity 2019 IL2CPP via BENDER) NUNCA chama eglSwapBuffers
+no guest (guest_swaps=0 em todas as frames). Sem alguem empurrar o backbuffer
+pra tela, o resultado e preto eterno. E o render_scale75=1 PIORAVA: desenhava
+em 480x360, brigando com o window real 640x480 (getWidth->480/getHeight->360 vs
+setBuffersGeometry 640x480) num caminho glBlitFramebuffer "single-present".
+
+CORRECAO (LAUNCHER_REV 2026-11-03-C), duas coisas, iguais ao port MODELO:
+1) BENDER_FRAME_HOST_PRESENT=1  (ULTRAKILL_HOST_PRESENT=1 no conf, ja PADRAO):
+   obriga o HOST a apresentar a cada frame, sem depender do swap do guest.
+2) ULTRAKILL_RENDER_SCALE_75=0  (novo PADRAO): desenha nativo 640x480 com swap
+   normal, igual ao cuphead. LIGUE o 75% (=1) so DEPOIS de ver imagem.
+
+ASSINATURAS DE SUCESSO deste proximo boot (present corrigido):
+  ">> LAUNCHER_REV 2026-11-03-C ..."        (prova que o launcher novo rodou)
+  ">> BENDER VIDEO: render_scale75=0 host_present=1 ..."
+  frames subindo E imagem visivel na tela (nao apenas host_present no log).
+  se ainda der preto com host_present=1 e scale=0: mande o log novo - ai o
+  suspeito passa a ser o proprio window/KMS (KMS_MODE) e nao mais o present.
+
+DIAGNOSTICO DO BOOT 2026-11-03-D (CAUSA RAIZ REAL - NAO E MAIS VIDEO)
+---------------------------------------------------------------------
+Com CRLF+Mali+present corrigidos, o log novo (LAUNCHER_REV -C) mostrou que o
+Mali sobe, o GLES context cria e o loop roda/apresenta - MAS a tela segue preta
+e o cursor pisca para sempre. O proprio Unity entregou o motivo:
+  [ANDROID_LOG][Unity] The referenced script on this Behaviour
+        (Game Object 'PlatformerController') is missing!
+  [BENDER_MANAGED_EXCEPTION_DETAIL] System.NullReferenceException ... at main start
+  MANAGED_BOOTSTRAP ... app_invokes=0 gate=before-load-default-region
+LEITURA: a cena boot carrega, mas o SCRIPT do proprio jogo (PlatformerController,
+code do Arkbox) NAO resolve em runtime -> a coroutine de startup lanca
+NullReferenceException -> o menu nunca inicializa -> o BENDER renderiza uma cena
+VAZIA para sempre (preto + cursor). ISTO NAO e configuracao de video/render e nao
+ha knob de video que resolva: e incompat loader(BENDER) x payload.
+
+O payload em si esta INTEGRo (verificado no PC):
+  global-metadata.dat head = AF 1B B1 FA  (magic IL2CPP valido, versao 24 = Unity 2019.4)
+  libil2cpp.so = ELF aarch64 valido; data.unity3d = "UnityFS" valido.
+  O base.apk traz libAPKVISION.so + libstub.so (hardening ApkVision), mas o
+  IL2CPP extraido de dentro dele esta limpo/legivel.
+
+O QUE FOI FEITO nesta rodada (LAUNCHER_REV -D, tudo REVERSIVEL, so video):
+  Reverti para o caminho VANILLA as DUAS otimizacoes que EU tinha acrescentado e
+  que poderiam estar desestabilizando este mesmo startup:
+    - ULTRAKILL_SKIP_INTRO=0   (antes 1) - nao pula o FMV (a coroutine pode
+          esperar no no da intro; skip -> NRE plausivel).
+    - ULTRAKILL_FORCE_LOW_QUALITY=0 (antes 1) - para de escrever UnityGraphicsQuality
+          no PlayerPrefs no boot (e removi a linha que eu tinha semeado).
+  Mantive o que e correto de driver: host_present=1 + render_scale=0.
+
+PROXIMO PASSO (o que o log novo precisa dizer):
+  - Se com -D aparecer IMAGEM/menu: eram mesmo as minhas otimizacoes; ai religa
+        intro-skip/low-quality UM de cada vez pra ver qual volta a quebrar.
+  - Se PERMANECAR o 'referenced script ... is missing' + NullReferenceException e
+        app_invokes=0: o port esta esbarrando no limite de compatibilidade
+        BENDER(probe 2.7.66 EXPERIMENTAL) x ULTRAKILL(scripts IL2CPP). Isso NAO se
+        resolve por config de video; exige outro probe/canal (build BENDER novo,
+        ou um payload nao-stripped/nao-ApkVision). Fora do escopo 'so video'.
+
+================================ VEREDITO FINAL (pos-teste -D) ================================
+O teste -D (caminho VANILLA: intro-skip=0, low-quality=0) CONFIRMOU o pior caso:
+persistiu EXATAMENTE o mesmo erro ->
+  [ANDROID_LOG][Unity] The referenced script on this Behaviour (Game Object
+        'PlatformerController') is missing!   (x2)
+  [BENDER_MANAGED_EXCEPTION_DETAIL] System.NullReferenceException ... main start
+  frames sobem (48,49,...66+) com guest_swaps=0, mas app_invokes=0 (menu nunca init).
+Logo as MINHAS otimizacionoes de video NAO eram a causa. Concluído tambem que o
+unity_probe.aarch64 do 60 Parsecs e o MESMO 'PROBE 2.7.66 AUDIO EXPERIMENTAL' (so
+muda o tamanho do binario), entao trocar de probe desta pasta NAO muda o resultado.
+
+STATE FINAL DESTE PORT:
+  - VIDEO / DRIVER: 100% corrigidos e PROVADOS (Mali r13p0 empacotado, sem erro
+        /dev/mali0, EGL+GLES sobem, contexto cria, present a cada frame).
+
+>>> CORRECAO DO VEREDITO (LAUNCHER_REV 2026-11-03-E) - A CAUSA ERA CORRIGIVEL <<<
+O "referenced script is missing" + NullReferenceException NAO era muro de loader.
+Foi DESCOMPASSO de versao do payload: o base.apk foi trocado, mas as libs nativas
+ja extraidas em unity_payload/lib/arm64-v8a ficaram do APK ANTIGO. O IL2CPP exige
+que libil2cpp.so e global-metadata.dat sejam do MESMO build (compartilham os
+hashes de tipo). Confirmacao no PC (hash de dentro do apk vs disco):
+    global-metadata.dat : disk == apk  (OK)
+    libil2cpp.so        : disk != apk  (VELHA!)  -> tipos dos scripts nao resolvem
+    libunity.so         : disk != apk  (VELHA!)
+Resultado: metadata/cenas novos + libil2cpp velho = Unity nao acha os proprios
+MonoBehaviours ('PlatformerController' missing) -> NRE no Start -> menu nunca vai.
+
+O QUE FOI FEITO (fix real, reversivel):
+  1) Reextraimos as 5 libs nativas (libil2cpp/libunity/libmain/libAPKVISION/
+        libstub) DE DENTRO do base.apk novo para unity_payload/lib/arm64-v8a.
+        Agora disk == apk em todas (MATCH=True). As libs velhas ficaram em
+        ultrakill/_stale_lib_backup/ (por seguranca).
+  2) SELF-HEAL no launcher (-E): a cada boot ele compara o libil2cpp.so do disco
+        com o de dentro do base.apk (cksum, barato) e, se divergir, REEXTRAIA
+        todas as libs do apk sozinho. Assim trocar de APK nunca mais descompassa.
+
+IMPORTANTE sobre o ApkVision: o base.apk ainda traz libAPKVISION.so/libstub.so
+(e um build protegido), mas o BENDER carrega libunity+libil2cpp diretamente pela
+propria porta (NativeLoader), ignorando a checagem de entrada do ApkVision; e o
+libil2cpp/global-metadata de dentro do apk estao validos. Logo o DRM NAO era o
+bloqueio - o bloqueio era so o descompasso de versao das libs, ja corrigido.
+
+APK TROCADA PELO USUARIO (ultrakillnovo.apk) - ja aplicada:
+  O ultrakillnovo.apk e o MESMO jogo byte-a-byte (libil2cpp/libunity/global-
+        metadata/cenas/catalog/todas as libs IGUAIS), so que SEM o ApkVision
+        (troca libAPKVISION.so+libstub.so por libandroidoyunclub.so benigno,
+        assinado com TESTKEY). Foi copiado para base.apk (o loader le base.apk).
+  Estado: base.apk = build limpo; disk libil2cpp/libunity/global-metadata == apk
+        (MATCH=True). ultrakillnovo.apk redundante foi apagado. O antigo (com
+        DRM) ficou em _apk_backups/base.apk.apkvision-OLD-*.bak (pode apagar
+        depois de confirmar que deu). Como o codigo do jogo e identico, o que
+        resolve o boot e a CONSISTENCIA de libs (ja garantida), nao a troca em si.
+
+AVANCO REAL no boot (log do -E confirmado no device):
+  Com as libs consistentes, o "referenced script missing" e o
+  NullReferenceException SUMIRAM. O boot agora PASSA do managed e chega ao
+  PRIMEIRO nativeRender. Ai ele ENTRA na inicializacao de audio (Unity FMOD
+  embutido -> AudioManager.getDevices -> builtin-speaker) e o log CORTE AI
+  (so ~3 frames; libfmod/libfmodstudio=not-present => cai no OpenSL/Android).
+  Ou seja: o novo gargalo e o warmup/trava do 1o frame no init de audio +
+  compilacao de shaders no RK366 (lento), nao mais o DRM nem as libs.
+
+CORRECAO (LAUNCHER_REV 2026-11-03-F) - tudo config/AV, reversivel:
+  1. BENDER_FMOD_FORCE_NOSOUND=1 (ULTRAKILL_NO_SOUND=1): abre o FMOD com saida
+     NOSOUND, pulando o init de hardware de audio onde o 1o frame travava.
+     (string achada no proprio probe: FMOD_STUDIO_OUTPUT_* + env do knob.)
+  2. ULTRAKILL_FORCE_LOW_QUALITY=1:UnityGraphicsQuality=0 no boot => variantes
+     de shader mais baratas => warmup do 1o frame mais rapido.
+  3. BENDER_MAX_SEC=300 -> 600: da folga pro 1o boot (compilar shader + cenas).
+  Nao mexeu em logica nem em shader compilado; so AV/preset/teto de tempo.
+
+PROXIMO TESTE (esperado AGORA dar imagem/menu):
+  - Recopie a PASTA INTEIRA (incluindo unity_payload/lib/arm64-v8a/*.so novas!)
+        para /roms/ports/ultrakill e ejete bem. Senao as libs do cartao seguem
+        velhas e o erro persiste.
+  - Log novo deve trazer ">> LAUNCHER_REV 2026-11-03-E" e, se as libs do cartao
+        ja estiverem certas, ">> libs nativas OK (batem com o base.apk)".
+  - Se ainda assim aparecer 'referenced script missing' com as libs OK: aí sim
+        seria incompat real do probe; mande o log que eu reavalio.
+
+AVISO PRATICO: se der tela preta de novo, NAO precisa reiniciar o console - o
+launcher tem teto BENDER_MAX_SEC=300s e devolve ao menu do ES sozinho em ~5min.

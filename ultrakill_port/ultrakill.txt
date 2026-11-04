@@ -1,0 +1,12 @@
+[Core]
+name="ULTRAKILL (TrimUI Smart Pro)"
+author="Arkbox Games / port nao-oficial Ark+Arc"
+version="v1.1a-ultradroid rev-L (2026-11-03)"
+notes="Port experimental de ULTRAKILL (build Android arm64 do repack mobile) para TrimUI Smart Pro / spruceOS.\nLoader padrao 'bender' (fonte em ultrakill/bender/unity_probe.c) com fallback automatico pro 'bridge' (wrapper SDL em ultrakill/wrapper/).\nReceita spruceOS aplicada: SDL_VIDEODRIVER=mali + flip/lib + /usr/trimui/lib, devfreq travado e restaurado, pad TSP com A/B pelo rotulo fisico.\nMouse virtual: START+R1 liga/desliga, B clica, analogico direito mueve (no bender tambem FN+D-para-BAIXO / R3).\nSom: bridge OpenSL ES -> SDL2 (bender/bender_opensles.c) + volumes do proprio jogo religados por tools/tune_prefs.py.\nAlvo de 30 FPS: interno 640x360 + pacing 33333us + qualidade 0 (ultrakill/ultrakill.conf).\nLeia ultrakill/LEIA-ESTE-PRIMEIRO.txt."
+button="ULTRAKIL.sh"
+platforms="tsp,trimui-smart-pro"
+tester="vc"
+req_glibc=""
+store_group="none"
+desc="Bootslayer's Return. First-person arena shooter (port nao-oficial)."
+icon=""

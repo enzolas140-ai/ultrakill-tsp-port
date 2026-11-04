@@ -432,6 +432,23 @@ EGLSurface eglCreateWindowSurface(EGLDisplay dpy, EGLConfig config,
     return (EGLSurface)w->egl_surface;
   }
 
+  /* >>> NOVO (rota PowerVR / TrimUI Smart Pro): se o bridge_gl conseguiu uma
+   * WINDOW surface de verdade (criada pelo SDL sobre GBM/KMS ou compositor),
+   * devolvemos ELA - nao um pbuffer. Motivo: quem faz o page flip no painel e
+   * essa surface; um pbuffer e offscreen, entao o jogo renderizaria para uma
+   * memoria que ninguém apresenta (a tela preta com frames subindo do log
+   * antigo). Aceitamos tambem o caso em que o Unity passa NULL/lixo (ele nunca
+   * teve uma Surface Java neste port). */
+  {
+    struct shim_native_window *w2 = current_anw();
+    if (w2 && w2->surface_is_window && w2->egl_surface) {
+      fprintf(stderr,
+              "shim/egl: eglCreateWindowSurface(win=%p) -> devolvendo WINDOW surface real do SDL %p (%dx%d) [swap do Unity = flip no painel]\n",
+              (void*)win, w2->egl_surface, w2->w, w2->h);
+      return (EGLSurface)w2->egl_surface;
+    }
+  }
+
   /* win NAO e nosso ANW: no caminho R36S (JNI_OnLoad -> initJni, sem
    * ANativeActivity_onCreate) o Unity nunca recebeu uma janela de verdade e
    * chama eglCreateWindowSurface(dpy, cfg, NULL/lixo). MESA devolve

@@ -2952,7 +2952,7 @@ static bjboolean jni_call_boolean_common_arg(BEnv*env,void*obj,void*mid,const ch
     else if(m&&!strcmp(name,"didCrashOnPreviousExecution")&&!strcmp(bender_jni_class_name((void*)m->ref0),"com/google/firebase/crashlytics/FirebaseCrashlytics")){result=0;logmsg("[BENDER_CRASHLYTICS][PREVIOUS_CRASH] -> 0 policy=fresh-host-session\n");}
     else if(m&&!strcmp(name,"canRequestAds")){result=1;logmsg("[BENDER_UMP][CAN_REQUEST_ADS] -> 1 policy=offline-not-required\n");}
     else if(m&&!strcmp(name,"isConsentFormAvailable")){result=0;logmsg("[BENDER_UMP][FORM_AVAILABLE] -> 0 policy=offline-not-required\n");}
-    else if(m&&!strcmp(name,"playCoreApiMissing")){result=0;logmsg("[BENDER_PAD][PLAY_CORE] apiMissing=0 policy=synthetic-installed-packs\n");}
+    else if(m&&!strcmp(name,"playCoreApiMissing")){const char*pc=getenv("BENDER_PLAYCORE_MISSING");int miss=(pc&&(!strcmp(pc,"1")||!strcmp(pc,"true")))?1:0;result=miss;logmsg("[BENDER_PAD][PLAY_CORE] apiMissing=%d policy=%s\n",miss,miss?"play-services-abenteue-rasado":"synthetic-installed-packs");}
     else if(m&&(!strcmp(name,"isConnected")||!strcmp(name,"isConnectedOrConnecting")||!strcmp(name,"isAvailable"))){BObj*bo=bender_known_bobj(obj);if(bo&&bo->kind==4&&!strcmp(bo->a,"android/net/NetworkInfo")){result=bender_network_online_2750()?1:0;logmsg("[BENDER_NETWORK][ANDROID] %s NetworkInfo -> %u\n",name,(unsigned)result);}}
     else if(m&&(!strcmp(name,"hasCapability")||!strcmp(name,"hasTransport"))){BObj*bo=bender_known_bobj(obj);if(bo&&bo->kind==4&&!strcmp(bo->a,"android/net/NetworkCapabilities")){result=bender_network_online_2750()?1:0;logmsg("[BENDER_NETWORK][ANDROID] %s NetworkCapabilities transport=%s -> %u\n",name,bender_network_type_name_2750(),(unsigned)result);}}
     else if(m&&(!strcmp(name,"isActiveNetworkMetered")||!strcmp(name,"isMetered"))){result=0;logmsg("[BENDER_NETWORK][ANDROID] %s -> 0\n",name);}
@@ -3033,6 +3033,10 @@ static void *bender_jni_proxy_dispatch(void*proxy,const char*method_name,void*ar
     int is_frame=(method_name&&!strcmp(method_name,"doFrame"));
     int is_surface_frame=(method_name&&!strcmp(method_name,"onFrameAvailable"));
     int is_ump_failure=(method_name&&(!strcmp(method_name,"onConsentInfoUpdateFailure")||!strcmp(method_name,"onConsentFormDismissed")));
+    /* ULTRAKILL fix -L: 'run' e o metodo de um Runnable despachado na UI thread
+     * (BENDER_UI_THREAD). Precisa de declaring class propria, senao o
+     * JNIBridge.invoke do libunity procura 'run' na interface errada. */
+    int is_runnable=(method_name&&!strcmp(method_name,"run"));
     int callback_argc=(arg0||is_handler||is_frame||is_surface_frame||is_ump_failure)?1:0;
     if(is_reflection_proxy){
         if(!g_reflection_proxy_invoke_fn||!g_reflection_helper_class){logmsg("[BENDER_JNI][REFLECTION_PROXY][SKIP] nativeProxyInvoke-not-captured proxy=%p cookie=0x%llx method=%s\n",proxy,(unsigned long long)(uint64_t)p->i64,method_name?method_name:"?");return NULL;}
@@ -3057,7 +3061,26 @@ static void *bender_jni_proxy_dispatch(void*proxy,const char*method_name,void*ar
     if(is_handler)want_iface="android/os/Handler$Callback";
     else if(is_frame)want_iface="android/view/Choreographer$FrameCallback";
     else if(is_surface_frame)want_iface="android/graphics/SurfaceTexture$OnFrameAvailableListener";
-    if(ifaces&&want_iface){for(bjsize ii=0;ii<ifaces->length;ii++){BObj*ic=bender_known_bobj(ifaces->items[ii]);if(ic&&ic->kind==1&&!strcmp(ic->a,want_iface)){decl=ifaces->items[ii];break;}}}
+    else if(is_runnable)want_iface="java/lang/Runnable";
+    int want_found=0;
+    if(ifaces&&want_iface){for(bjsize ii=0;ii<ifaces->length;ii++){BObj*ic=bender_known_bobj(ifaces->items[ii]);if(ic&&ic->kind==1&&!strcmp(ic->a,want_iface)){decl=ifaces->items[ii];want_found=1;break;}}}
+    /* ULTRAKILL fix -L (causa do hang no 1o frame, evidenciado no log de 04/11):
+     * este proxy nasceu de um Dialog do jogo, entao a lista de interfaces dele e
+     * [DialogInterface$OnClickListener, OnKeyListener, OnCancelListener,
+     * CompoundButton$OnCheckedChangeListener, java/lang/Runnable] - e o que as
+     * comparacoes SAME_OBJECT do log percorre. Sem forcar java/lang/Runnable como
+     * declaring class do metodo 'run', o JNIBridge.invoke do PROPRIO libunity
+     * procurava 'run' em DialogInterface$OnClickListener e lancarava
+     *   java.lang.NoSuchMethodError: public abstract void java.lang.Runnable.run()
+     * (EXATAMENTE o par EXCEPTION_ISOLATED + BENDER_SYNC][WAIT_BEGIN
+     * kind=cond module=libunity.so offset=0x2e38ac do unity_probe.log: o runnable
+     * nunca rodava de verdade e a thread de render ficava no cond wait). */
+    if(is_runnable&&!want_found){
+        static void*uk_runnable_cls=NULL;
+        if(!uk_runnable_cls)uk_runnable_cls=new_obj(1,"java/lang/Runnable",NULL);
+        decl=uk_runnable_cls;
+        logmsg("[BENDER_JNI][JNIBRIDGE_DISPATCH][RUNNABLE_FIX] method=run decl forcado p/ java/lang/Runnable proxy=%p\n",proxy);
+    }
     if(!decl)decl=g_jnibridge_class;
     logmsg("[BENDER_JNI][JNIBRIDGE_DISPATCH][DECL] method=%s interface=%s decl=%p\n",method_name?method_name:"?",want_iface?want_iface:"default",decl);
     const char*callback_sig=is_handler?"(Landroid/os/Message;)Z":(is_frame?"(J)V":(is_surface_frame?"(Landroid/graphics/SurfaceTexture;)V":(is_ump_failure?"(Lcom/google/android/ump/FormError;)V":"()V")));
@@ -5561,10 +5584,27 @@ static __attribute__((unused)) void bender_input_poll(unsigned frame){
     int up=bender_input_button(BENDER_SDL_CONTROLLER_BUTTON_DPAD_UP),down=bender_input_button(BENDER_SDL_CONTROLLER_BUTTON_DPAD_DOWN),left=bender_input_button(BENDER_SDL_CONTROLLER_BUTTON_DPAD_LEFT),right=bender_input_button(BENDER_SDL_CONTROLLER_BUTTON_DPAD_RIGHT);if(bender_input_editor_poll_2745(fn,up,down,left,right)){g_bender_input_prev_buttons[BENDER_SDL_CONTROLLER_BUTTON_DPAD_UP]=(unsigned char)up;g_bender_input_prev_buttons[BENDER_SDL_CONTROLLER_BUTTON_DPAD_DOWN]=(unsigned char)down;g_bender_input_prev_buttons[BENDER_SDL_CONTROLLER_BUTTON_DPAD_LEFT]=(unsigned char)left;g_bender_input_prev_buttons[BENDER_SDL_CONTROLLER_BUTTON_DPAD_RIGHT]=(unsigned char)right;g_bender_input_prev_fn=fn;return;}bender_input_augment_2744(fn);
     if(!g_bender_unity_keymap_loaded){bender_unity_keymap_load_2744();}
     if(fn){int y=bender_input_button(BENDER_SDL_CONTROLLER_BUTTON_Y);if(up&&!g_bender_input_prev_buttons[BENDER_SDL_CONTROLLER_BUTTON_DPAD_UP])bender_input_toggle("keyboard",&g_bender_input_keyboard_active);if(down&&!g_bender_input_prev_buttons[BENDER_SDL_CONTROLLER_BUTTON_DPAD_DOWN])bender_input_toggle("mouse",&g_bender_input_mouse_active);if(right&&!g_bender_input_prev_buttons[BENDER_SDL_CONTROLLER_BUTTON_DPAD_RIGHT])bender_input_toggle("keymap",&g_bender_input_keymap_active);if(y&&!g_bender_unity_keymap_reload_prev){bender_unity_keymap_load_2744();bender_stick_cfg_load_2744();snprintf(g_bender_input_notice,sizeof(g_bender_input_notice),"MAPAS RECARREGADOS");g_bender_input_notice_until_ms=bender_input_now_ms()+3000ll;}g_bender_unity_keymap_reload_prev=y;}else g_bender_unity_keymap_reload_prev=0;bender_mouse_speed_hotkeys_2767(fn);
+    /* ===== ULTRAKILL/TSP rev -L: START+R1 tambem liga/DESLIGA o mouse =====
+     * Pedido explicito do usuario no TrimUI Smart Pro (nao tem touch screen).
+     * O esquema antigo (FN=GUIDE/raw16 ou L1+R1, depois DOWN) continua
+     * valendo como alias - isto e apenas um segundo atalho, mais curto e sem
+     * depender do botao GUIDE (que no TSP nao e exposto pelo driver em muitos
+     * firmwares, e L1+R1 collide com mira/arma do proprio jogo).
+     * START e R1 individualmente NAO sao engolidos: em modo mouse o B passa a
+     * ser clique (ver bender_input_poll adiante), entao o toggle caindo aqui
+     * nao rouba pause nem tiro.
+     * Env: BENDER_MOUSE_TOGGLE_START_R1=0 desliga este atalho. */
+    {static int uk_sr1_prev=0,uk_sr1_en=-1;if(uk_sr1_en<0){const char*e=getenv("BENDER_MOUSE_TOGGLE_START_R1");uk_sr1_en=(!e||!*e||strcmp(e,"0"))?1:0;}
+     if(uk_sr1_en){int sr1=bender_input_button(BENDER_SDL_CONTROLLER_BUTTON_START)&&bender_input_button(BENDER_SDL_CONTROLLER_BUTTON_RIGHTSHOULDER);
+       if(sr1&&!uk_sr1_prev){bender_input_toggle("mouse",&g_bender_input_mouse_active);logmsg("[BENDER_INPUT][MOUSE_TOGGLE] hotkey=START+R1 -> %s\n",g_bender_input_mouse_active?"ON":"OFF");}
+       uk_sr1_prev=sr1;}}
     bender_soft_keyboard_lifecycle_fix99();
     if(g_bender_input_keyboard_active&&!fn)bender_keyboard_poll(up,down,left,right);
     if(g_bender_input_mouse_active&&!fn&&!g_bender_input_keyboard_active&&!g_bender_stick_touch_enabled_2744){int rx=bender_input_axis(BENDER_SDL_CONTROLLER_AXIS_RIGHTX),ry=bender_input_axis(BENDER_SDL_CONTROLLER_AXIS_RIGHTY);float dx=0,dy=0;if(!g_bender_input_keymap_active){if(left)dx-=5;if(right)dx+=5;if(up)dy-=5;if(down)dy+=5;}if(rx>7000||rx<-7000)dx+=(float)rx/7000.0f;if(ry>7000||ry<-7000)dy+=(float)ry/7000.0f;if(dx||dy){float mouse_scale=(float)g_bender_mouse_speed_percent_2767/100.0f;dx*=mouse_scale;dy*=mouse_scale;g_bender_input_cursor_x+=dx;g_bender_input_cursor_y+=dy;if(g_bender_input_cursor_x<0)g_bender_input_cursor_x=0;if(g_bender_input_cursor_y<0)g_bender_input_cursor_y=0;if(g_bender_input_cursor_x>BENDER_DISPLAY_WIDTH-1)g_bender_input_cursor_x=BENDER_DISPLAY_WIDTH-1;if(g_bender_input_cursor_y>BENDER_DISPLAY_HEIGHT-1)g_bender_input_cursor_y=BENDER_DISPLAY_HEIGHT-1;bender_input_inject_motion(2,g_bender_input_cursor_x,g_bender_input_cursor_y,"mouse-move");}
-        int click=bender_input_button(BENDER_SDL_CONTROLLER_BUTTON_A)||bender_input_button(BENDER_SDL_CONTROLLER_BUTTON_RIGHTSTICK);int prevclick=(g_bender_input_prev_buttons[15]!=0);if(click!=prevclick)bender_input_inject_motion(click?0:1,g_bender_input_cursor_x,g_bender_input_cursor_y,"mouse-click");g_bender_input_prev_buttons[15]=(unsigned char)click;
+        /* Clique do mouse virtual: no TrimUI Smart Pro o usuario pediu o
+         * botao B (direita) como clique. Mantem A e R3 (esquema antigo) para
+         * nao regredir quem ja usava; BENDER_MOUSE_CLICK_B=0 tira o B. */
+        int click=bender_input_button(BENDER_SDL_CONTROLLER_BUTTON_B)||bender_input_button(BENDER_SDL_CONTROLLER_BUTTON_A)||bender_input_button(BENDER_SDL_CONTROLLER_BUTTON_RIGHTSTICK);int prevclick=(g_bender_input_prev_buttons[15]!=0);if(click!=prevclick)bender_input_inject_motion(click?0:1,g_bender_input_cursor_x,g_bender_input_cursor_y,"mouse-click");g_bender_input_prev_buttons[15]=(unsigned char)click;
     }
     if(g_bender_input_touchmap_active&&!fn&&!g_bender_input_mouse_active&&!g_bender_input_keyboard_active&&!g_bender_stick_touch_enabled_2744){int rx=bender_input_axis(BENDER_SDL_CONTROLLER_AXIS_RIGHTX),ry=bender_input_axis(BENDER_SDL_CONTROLLER_AXIS_RIGHTY);float dx=0,dy=0;if(left)dx-=5;if(right)dx+=5;if(up)dy-=5;if(down)dy+=5;if(rx>7000||rx<-7000)dx+=(float)rx/7000.0f;if(ry>7000||ry<-7000)dy+=(float)ry/7000.0f;if(dx||dy){g_bender_input_cursor_x+=dx;g_bender_input_cursor_y+=dy;if(g_bender_input_cursor_x<0)g_bender_input_cursor_x=0;if(g_bender_input_cursor_y<0)g_bender_input_cursor_y=0;if(g_bender_input_cursor_x>BENDER_DISPLAY_WIDTH-1)g_bender_input_cursor_x=BENDER_DISPLAY_WIDTH-1;if(g_bender_input_cursor_y>BENDER_DISPLAY_HEIGHT-1)g_bender_input_cursor_y=BENDER_DISPLAY_HEIGHT-1;bender_input_inject_motion(2,g_bender_input_cursor_x,g_bender_input_cursor_y,"touchmap-move");}int ta=bender_input_button(BENDER_SDL_CONTROLLER_BUTTON_A);if(ta!=g_bender_touch_prev_a)bender_input_inject_motion(ta?0:1,g_bender_input_cursor_x,g_bender_input_cursor_y,"touchmap-A");g_bender_touch_prev_a=ta;}
     if(g_bender_input_keymap_active&&!fn&&!g_bender_input_keyboard_active&&!g_bender_input_touchmap_active){int btns[16]={BENDER_SDL_CONTROLLER_BUTTON_A,BENDER_SDL_CONTROLLER_BUTTON_B,BENDER_SDL_CONTROLLER_BUTTON_X,BENDER_SDL_CONTROLLER_BUTTON_Y,BENDER_SDL_CONTROLLER_BUTTON_LEFTSHOULDER,BENDER_SDL_CONTROLLER_BUTTON_RIGHTSHOULDER,-1,-1,BENDER_SDL_CONTROLLER_BUTTON_START,BENDER_SDL_CONTROLLER_BUTTON_BACK,BENDER_SDL_CONTROLLER_BUTTON_LEFTSTICK,BENDER_SDL_CONTROLLER_BUTTON_RIGHTSTICK,BENDER_SDL_CONTROLLER_BUTTON_DPAD_UP,BENDER_SDL_CONTROLLER_BUTTON_DPAD_DOWN,BENDER_SDL_CONTROLLER_BUTTON_DPAD_LEFT,BENDER_SDL_CONTROLLER_BUTTON_DPAD_RIGHT};for(int i=0;i<16;i++)if(btns[i]>=0&&g_bender_unity_keymap[i]>0)bender_input_key_edge(btns[i],g_bender_unity_keymap[i],g_bender_unity_keymap_names[i]);

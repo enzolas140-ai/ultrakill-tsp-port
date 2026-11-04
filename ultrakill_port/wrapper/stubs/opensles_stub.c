@@ -1,65 +1,25 @@
-/* opensles_stub.c - OpenSL ES no-op.
+/* opensles_stub.c - ARQUIVO APOSENTADO (nao e mais compilado).
  *
- * Unity 2019.4 chama slCreateEngine uma vez, depois cria um AudioPlayer
- * por canal, e alimenta PCM via SLAndroidBufferQueueItf. Se retornarmos
- * SL_RESULT_SUCCESS mas nao implementarmos o buffer queue, o engine
- * aloca tudo, chama Enqueue() que vira drop, e nunca faz underflow. O
- * resultado: jogo roda silencioso. Perfeito pra smoke-test.
+ * A partir da rev -L (2026-11-03) o libOpenSLES.so do port e construido a
+ * partir de wrapper/audio/bender_opensles.c - a MESMA fonte do bridge que o
+ * loader BENDER usa e que o CI ja compila (see .github/workflows/build-wrapper.yml:
+ *   gcc -O2 -fPIC -shared bender/bender_opensles.c -o audio_bridge/libOpenSLES.so).
  *
- * TODO (audio real): rotear SLPlayItf::SetPlayState -> um ring-buffer
- * de 20ms x 2 canais mandando em snd_pcm_writei (ALSA). Isso ~300 LOC. */
-#include <android_shim.h>
-#include <stdlib.h>
-#include <string.h>
-
-/* Todos os "objetos" sao um token opaco com um refcount. */
-struct sl_obj { SLuint32 state; int refs; };
-
-static SLresult ok(void) { return SL_RESULT_SUCCESS; }
-
-__attribute__((visibility("default")))
-SLresult slCreateEngine(SLobject *e, SLuint32 nOpt, const void *optItf,
-                        SLuint32 nItf, const SLinterface *itf, const void *named) {
-  (void)nOpt; (void)optItf; (void)nItf; (void)itf; (void)named;
-  struct sl_obj *o = calloc(1, sizeof(*o));
-  o->refs = 1; o->state = 0;  /* UNREALIZED */
-  if (e) *e = o;
-  return ok();
-}
-
-__attribute__((visibility("default")))
-SLresult slDestroyObject(SLobject o) {
-  struct sl_obj *x = o;
-  if (x && --x->refs <= 0) free(x);
-  return ok();
-}
-
-__attribute__((visibility("default")))
-SLresult slRealizeObject(SLobject o) {
-  struct sl_obj *x = o; if (x) x->state = SL_OBJECT_STATE_REALIZED;
-  return ok();
-}
-
-__attribute__((visibility("default")))
-SLresult slGetObjectState(SLobject o, SLuint32 *state) {
-  struct sl_obj *x = o; if (x && state) *state = x->state;
-  return ok();
-}
-
-__attribute__((visibility("default")))
-SLresult slGetInterface(SLobject o, const SLinterface iid, SLinterface *iface) {
-  /* Retorna NULL em *iface pra forcar Unity a cair em caminho "unsupported".
-   * Alguns builds Unity 2019.4 vao aceitar; outros vao chamar SL_RESULT_
-   * FEATURE_UNSUPPORTED e logar. Testar. */
-  (void)o; (void)iid;
-  if (iface) *iface = NULL;
-  return SL_RESULT_FEATURE_UNSUPPORTED;
-}
-
-__attribute__((visibility("default")))
-SLresult slSetInterfaceState(SLobject o, const SLinterface iid, SLuint32 s) {
-  (void)o; (void)iid; (void)s; return ok();
-}
-
-__attribute__((visibility("default")))
-SLresult slRegisterClass(void) { return ok(); }
+ * Por que nao a implementation anterior deste arquivo: ela foi escrita de
+ * memoria do header Khronos e errava CONSTANTES que o FMOD compara em runtime,
+ * nomeadamente
+ *   SL_PLAYSTATE_PLAYING            (real = 3;  aqui estava 2)
+ *   SL_OBJECT_STATE_REALIZED        (real = 3;  aqui estava 2)
+ *   SL_DATAFORMAT_PCM               (real = 2;  aqui estava 4)
+ *   SL_DATALOCATOR_*                (real: BUFFERQUEUE=6, OUTPUTMIX=4,
+ *                                    ANDROIDSIMPLEBUFFERQUEUE=0x800007BD)
+ *   SL_RESULT_FEATURE_UNSUPPORTED   (real = 12; aqui estava 43)
+ * Com PLAYSTATE errado, o SetPlayState(PLAYING) do FMOD nunca batia com o
+ * "playing" interno -> nenhum callback de buffer queue -> audio morto mesmo
+ * com o dispositivo aberto. Os valores corretos estao documentados (e usados)
+ * em audio/bender_opensles.c e em include/sles_shim.h.
+ *
+ * Este arquivo fica vazio de proposito para nao virar fonte de verdade pela
+ * metade no proximo refactor. Se precisar mexer no som, mexa em
+ * audio/bender_opensles.c. */
+typedef int ultrakill_opensles_stub_retired__;

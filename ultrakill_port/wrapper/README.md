@@ -20,9 +20,18 @@ O que stubamos:
 |-----|------------------|----------------|
 | `liblog.so`        | `__android_log_print/write/vprint/assert` → `vfprintf(stderr)` | log visivel |
 | `libandroid.so`    | `AAssetManager_*`, `ALooper_*`, `AMemory_*`, `AConfiguration_*` | Unity le `gamedata/` como se fosse APK assets |
-| `libOpenSLES.so`   | `slCreateEngine` e familia, todos no-op com `SL_RESULT_SUCCESS` | jogo abre **sem audio** (aceitavel p/ smoke-test) |
+| `libOpenSLES.so`   | **bridge real OpenSL ES → SDL2** (`slCreateEngine` + vtables de object/engine/play/bufferqueue/androidconfig + globais `SL_IID_*`) | **SOM**: o FMOD embutido no `libunity.so` faz `dlopen("libOpenSLES.so")`; sem vtable correta ele saltava em lixo (SIGBUS no `nativeResume`) |
 | `libmediandk.so`   | `AMediaExtractor/Codec` no-op | cutscenes `.webm` nao tocam (aceitavel: UK-Death_MARK e o unico level que usa) |
 | `libandroid` NativeActivity | `ANativeActivity_onCreate` — o bridge chama **para dentro** do `libunity.so`, nao vice-versa | |
+
+> **Prova (nao chute)**: `python3 ../tools/dumpelf.py ../unity_payload/lib/arm64-v8a/libunity.so --undef`
+> lista **zero** simbolo `sl*`/`AInputQueue*`, e a `.rodata` traz
+> `libOpenSLES.so`, `slCreateEngine`, `SL_IID_ENGINE`, `SL_IID_PLAY`,
+> `SL_IID_BUFFERQUEUE`, `SL_IID_ANDROIDSIMPLEBUFFERQUEUE`,
+> `SL_IID_ANDROIDCONFIGURATION`, `SL_IID_RECORD`, `disableOpenSL` e
+> `../android/src/fmod_output_opensl.cpp` → audio e carregado em runtime
+> (`dlopen`/`dlsym`), e o input entra **somente** por
+> `nativeInjectEvent(Landroid/view/InputEvent;)Z`.
 
 ## Arquivos
 
@@ -33,14 +42,16 @@ wrapper/
 ├── CMakeLists.txt               <- constrói 4 .so + 1 ELF
 ├── bridge/
 │   ├── bridge_main.c            <- ELF: dlopen libunity.so, chama UnityMain
-│   ├── bridge_input.c           <- SDL event thread (gamepad/teclado/mouse)
+│   ├── bridge_input.c           <- SDL event thread + MOUSE VIRTUAL + inject JNI
 │   ├── bridge_input.h
 │   └── bridge_unity.h           <- typedefs NDK/Unity minimais
 ├── include/
-│   └── android_shim.h           <- cabecalho compartilhado
+│   ├── android_shim.h           <- cabecalho compartilhado
+│   └── sles_shim.h              <- ABI OpenSL ES 1.0.1 + extensoes Android (NOVO)
 ├── jni/
 │   ├── bridge_jni.h             <- structs JNI vtable (ABI exato com jni.h NDK 21)
-│   └── bridge_jni.c             <- mini-JVM: ~25 métodos implementados + tabela de valores
+│   └── bridge_jni.c             <- mini-JVM: vtable COMPLETA + objetos
+│                                   MotionEvent/KeyEvent virtuais (input)
 ├── gl/
 │   ├── bridge_gl.h              <- SDL2+EGL: shim_gl_ctx
 │   ├── bridge_gl.c              <- cria janela, EGL context GLES3
@@ -71,16 +82,19 @@ wrapper/
 | AAssetManager → filesystem | ✅ completo | `android_asset_stub.c` |
 | ALooper / AConfiguration | ✅ completo | `android_nativeactivity_stub.c` |
 | liblog → stderr | ✅ completo | `android_log_stub.c` |
-| OpenSL ES no-op | ✅ completo | áudio silencioso |
+| **OpenSL ES → SDL2 (som)** | ✅ **reescrito (rev -L)** | `stubs/opensles_stub.c` + `include/sles_shim.h`; antes era no-op SEM vtable (causa do SIGBUS no audio) |
 | Media NDK no-op | ✅ completo | cutscenes ignoradas |
-| JavaVM/JNIEnv | 🟡 esqueleto | ~25 métodos; tabela `known_ints` precisa crescer conforme Player.log reclamar |
-| SDL2 window + EGL context | ✅ completo | `gl/bridge_gl.c` |
-| **libEGL.so shim** | ✅ | `gl/bridge_egl_shim.c` - 30+ forwarders + special cases |
-| **Input loop** | ✅ | SDL2 gamepad/keyboard -> AInputQueue + UnitySend* dual path |
-| **Shader discovery + SIGSEGV guard** | ✅ novo (R1-b passo 0) | `gl/bridge_shader_stub.c` - enumera .dynsym, handler com backtrace + PC + dladdr, registry de hooks |
-| **symbol_probe CLI** | ✅ novo | `tests/symbol_probe.c` - roda offline contra qualquer libunity.so e revela se `Shader::CreateProgram` esta exportado ou nao |
-| **GOT-patch real** (substituir funcao) | ❌ pendente | `patch_got_for()` retorna NAO-IMPLEMENTADO; preenchido apos ver o probe output real no device |
-| Re-export das Addressables p/ Android/GLES | ❌ bloqueio real | se simbolo nao exportar nem via pattern-scan, este e o fallback ultimo |
+| JavaVM/JNIEnv | 🟡 esqueleto | vtable **completa** (rev -L); tabela `known_ints` ainda cresce conforme Player.log reclamar |
+| **objetos MotionEvent/KeyEvent falsos** | ✅ novo (rev -L) | `shim_jni_make_event()` + dispatcher `ev_get_int/ev_get_float` em `bridge_jni.c` |
+| SDL2 window + EGL context | ✅ completo | `gl/bridge_gl.c`; **reaproveita a window surface do SDL** (PowerVR) |
+| **libEGL.so shim** | ✅ + SONAME corrigido | `gl/bridge_egl_shim.c`; devolve a surface de JANELA ao Unity em vez de pbuffer |
+| **Input loop** | ✅ reescrito (rev -L) | SDL2 → `nativeInjectEvent` (JNI) **+ AInputQueue** (fallback) |
+| **Mouse virtual** | ✅ novo (rev -L) | START+R1 liga/desliga, B = clique, stick = ponteiro; `bridge/bridge_input.c` |
+| **Shader discovery + SIGSEGV guard** | ✅ | `gl/bridge_shader_stub.c` - enumera .dynsym, handler com backtrace + PC + dladdr, registry de hooks |
+| **symbol_probe CLI** | ✅ | `tests/symbol_probe.c` - roda offline contra qualquer libunity.so |
+| **dumpelf.py / ccheck.py** | ✅ novo | `../tools/` - inspecao de ELF e checagem de fontes sem compilador |
+| GOT-patch real (substituir funcao) | ❌ pendente | `patch_got_for()` retorna NAO-IMPLEMENTADO |
+| Re-export das Addressables p/ Android/GLES | ✅ **nao precisa** | o payload em uso e o build Android (`aa/Android/*.bundle` com ESSL/ETC2); o mito do DXBC valia so para o APK Windows antigo |
 
 ## Como o `bridge_egl_shim.c` fecha o gap gráfico
 
@@ -121,6 +135,64 @@ Retornar a mesma EGLSurface mantém tudo coerente.
 `libEGL.so.1` explicitamente (nunca `libEGL.so`). O shim instala-se com
 o nome de arquivo exato `libEGL.so` — sem .1 — para casar com o `NEEDED`
 do `libunity.so`. Os dois nomes nunca se encontram.
+
+## Input: como o ULTRAKILL realmente recebe eventos (rev -L)
+
+```
+SDL_WaitEventTimeout (thread de input)
+        |
+        +-- botao (gamepad/teclado)
+        |      |
+        |      +-- combo START+R1?  -> TOGGLE mouse virtual (NENHUM dos 2 vai ao jogo)
+        |      +-- mouse ON + B?    -> clique (touch down/up no ponteiro)
+        |      +-- senao -> shim_jni_event (is_key=1) --> UnityPlayer.nativeInjectEvent(ev)
+        |                            (mini-JVM responde getKeyCode/getAction/getDownTime/...)
+        |      [e em paralelo empilha AInputQueue - fallback p/ NativeActivity]
+        |
+        +-- analogico
+        |      +-- mouse ON + stick do ponteiro -> move ponteiro (+ touch MOVE se clicado)
+        |      +-- senao -> shim_jni_event motion (source=JOYSTICK, axis[] completos)
+        |                    --> nativeInjectEvent(ev); Unity le getAxisValue(AXIS_RX, 0) etc
+        |
+        +-- toque/mouse fisicos (devbox) -> motion TOUCHSCREEN direto
+```
+
+Os knobs (todos no `../ultrakill.conf`, lidos por `getenv` em
+`bridge/bridge_input.c`): `ULTRAKILL_MOUSE`, `ULTRAKILL_MOUSE_TOGGLE`,
+`ULTRAKILL_MOUSE_CLICK`, `ULTRAKILL_MOUSE_STICK`, `ULTRAKILL_MOUSE_SPEED`,
+`ULTRAKILL_MOUSE_DEADZONE`, `ULTRAKILL_MOUSE_MODE`.
+
+Por que nao `UnitySendTouchEvent`? Porque **esses simbolos nao existem** no
+build Android do Unity 2019.4 (`.dynsym` so exporta `JNI_OnLoad`,
+`UnitySendMessage`, `UnitySwappy_*`); e um `dlsym` de nome ausente numa lib
+grande derrubava o loader desta glibc (SIGSEGV em `ld+0x9048`, visto no log).
+`shim_input_start()` por isso nao tenta mais nenhum `UnitySend*`.
+
+## Som: o caminho OpenSL ES -> SDL2 (rev -L)
+
+```
+libunity.so (FMOD estatico) -- dlopen --> libOpenSLES.so (nosso shim)
+   slCreateEngine(&engine,...)          -> objeto com SLObjectItf_ de verdade
+   (*engine)->GetInterface(SL_IID_ENGINE)
+   (*engine)->CreateOutputMix / CreateAudioPlayer(source=ASBQ+PCM, sink=Mix)
+   (*player)->GetInterface(SL_IID_PLAY | SL_IID_ANDROIDSIMPLEBUFFERQUEUE)
+   (*bq)->RegisterCallback(cb, ctx)     -> guardamos cb
+   (*bq)->Enqueue(buf, n)               -> SDL_QueueAudio(dev, buf, n)
+   pump thread (4 ms):                   consumido = total_enfileirado
+                                         - SDL_GetQueuedAudioSize(dev)
+     para CADA buffer cujo fim cumulativo <= consumido -> cb(bq, ctx)
+```
+
+Sem dispositivo SDL (sem `/dev/snd`, permissao, SDL < 2.0.4) o shim entra em
+modo **relogio**: consome bytes na taxa nominal, o mixer do FMOD continua
+girando e o unico sintoma e o silencio — **nunca** trava o boot. Forcar esse
+modo: `ULTRAKILL_AUDIO=0`.
+
+ABI conferida contra `../audio_bridge/libOpenSLES.so` (o bridge de referencia
+ja embarcado no port): `nm` mostra `slCreateEngine` + 7 globais `SL_IID_*` de
+8 bytes — nosso shim exporta os mesmos nomes no mesmo formato, e compara IID
+por identidade de ponteiro (aceitando tanto o valor do global quanto o endereco
+dele, porque headers diferentes resolvem `SL_IID_x` de jeitos diferentes).
 
 ## Variáveis de ambiente úteis no shim
 

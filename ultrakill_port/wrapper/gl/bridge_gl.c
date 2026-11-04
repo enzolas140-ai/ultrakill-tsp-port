@@ -83,6 +83,11 @@ typedef EGLBoolean (*PFN_eglBindAPI)(EGLenum);
 typedef const char*(*PFN_eglQueryString)(EGLDisplay, int);
 typedef EGLint     (*PFN_eglGetError)(void);
 typedef void*      (*PFN_eglGetProcAddress)(const char*);
+typedef EGLDisplay (*PFN_eglGetCurrentDisplay)(void);
+typedef EGLContext (*PFN_eglGetCurrentContext)(void);
+typedef EGLSurface (*PFN_eglGetCurrentSurface)(EGLint);
+#define EGL_DRAW   0x305D
+#define EGL_READ   0x305E
 /* GL core via eglGetProcAddress (so o que o present precisa): */
 typedef void       (*PFN_glReadPixels)(int,int,int,int,unsigned int,unsigned int,void*);
 #define GL_RGBA         0x1908
@@ -100,6 +105,9 @@ static PFN_eglBindAPI                 p_eglBindAPI;
 static PFN_eglQueryString             p_eglQueryString;
 static PFN_eglGetError                p_eglGetError;
 static PFN_eglGetProcAddress          p_eglGetProcAddress_real;
+static PFN_eglGetCurrentDisplay       p_eglGetCurrentDisplay;
+static PFN_eglGetCurrentContext       p_eglGetCurrentContext;
+static PFN_eglGetCurrentSurface       p_eglGetCurrentSurface;
 static PFN_glReadPixels               p_glReadPixels;
 
 static int load_egl(void) {
@@ -139,6 +147,13 @@ static int load_egl(void) {
   if (!p_eglCreatePbufferSurface)
     fprintf(stderr, "bridge_gl: eglCreatePbufferSurface ausente (ok se nao usar ULTRAKILL_NO_SDL_GL)\n");
   p_eglGetProcAddress_real = (PFN_eglGetProcAddress)dlsym(h, "eglGetProcAddress");
+  /* As tres abaixo sao o coracao da rota PowerVR/TSP: o SDL cria contexto +
+   * window surface (GBM/KMS ou compositor) e nos APRENDEMOS quais sao, sem
+   * ter que cutucar SDL_SysWMinfo (que nao expoe o gbm_surface em todas as
+   * versoes de SDL2). */
+  p_eglGetCurrentDisplay = (PFN_eglGetCurrentDisplay)dlsym(h, "eglGetCurrentDisplay");
+  p_eglGetCurrentContext = (PFN_eglGetCurrentContext)dlsym(h, "eglGetCurrentContext");
+  p_eglGetCurrentSurface = (PFN_eglGetCurrentSurface)dlsym(h, "eglGetCurrentSurface");
 #undef LOAD
   return 0;
 }
@@ -382,6 +397,51 @@ shim_gl_status shim_gl_init(shim_gl_ctx *out, int w, int h, const char *title) {
 
   if (load_egl() != 0) return SHIM_GL_NO_EGL;
 
+  /* ======== ROTA PADRAO NO TRIMUI SMART PRO: contexto+surface DO SDL ========
+   * No caminho manual de baixo nos criamos o EGLDisplay/contexto/surface por
+   * conta. Isso funciona no X11/Wayland de uma devbox, mas num handheld sem
+   * compositor o SDL esta falando GBM/KMS com o DDK, e um gbm_surface e unico
+   * por janela: criar uma segunda window surface por fora ou da
+   * EGL_BAD_NATIVE_WINDOW ou da uma surface que NINGUEM apresenta (o flip e o
+   * page flip que o SDL programa no CRTC). Entao deixamos o SDL fazer o
+   * trabalho (SDL_GL_CreateContext chama eglGetDisplay/Initialize/
+   * CreateWindowSurface/MakeCurrent do jeito certo daquele backend) e apenas
+   * APRENDEMOS quais sao o display e a surface que ele deixou current.
+   *
+   * Depois SOLTFAMOS o contexto (SDL_GL_MakeCurrent(win, NULL)) porque uma
+   * EGLSurface so pode estar current num contexto por vez: se o nosso
+   * continuasse colado, o eglMakeCurrent do proprio Unity daria EGL_BAD_ACCESS.
+   * O Unity entao cria o contexto dele em cima da NOSSA window surface, e cada
+   * eglSwapBuffers dele vira flip real no painel. */
+  int surface_is_window = 0;
+  EGLConfig cfg_sel = (EGLConfig)0;   /* escolhido no caminho manual (NULL no SDL) */
+  if (!no_sdl_gl && p_eglGetCurrentDisplay && p_eglGetCurrentSurface &&
+      !getenv("ULTRAKILL_NO_SDL_CONTEXT")) {
+    SDL_GLContext sc = SDL_GL_CreateContext(win);
+    if (sc) {
+      EGLDisplay d = p_eglGetCurrentDisplay ? p_eglGetCurrentDisplay() : EGL_NO_DISPLAY;
+      EGLSurface s = p_eglGetCurrentSurface(EGL_DRAW);
+      fprintf(stderr, "bridge_gl: contexto SDL criado; GL ver=%s\n", gl_version_probe());
+      SDL_GL_MakeCurrent(win, NULL);      /* libera a surface p/ o Unity */
+      if (d && s && s != EGL_NO_SURFACE) {
+        out->egl_display = d;
+        out->egl_surface = s;
+        out->egl_context = NULL;          /* o Unity faz o dele */
+        surface_is_window = 1;
+        fprintf(stderr, "bridge_gl: reaproveitando EGL do SDL: dpy=%p surf=%p (WINDOW -> swap do Unity da flip no painel)\n",
+                (void*)d, (void*)s);
+      } else {
+        fprintf(stderr, "bridge_gl: SDL criou contexto mas nao achou display/surface current (dpy=%p surf=%p) - voltando ao EGL manual\n",
+                (void*)d, (void*)s);
+        SDL_GL_DeleteContext(sc);
+      }
+    } else {
+      fprintf(stderr, "bridge_gl: SDL_GL_CreateContext falhou (%s) - voltando ao EGL manual\n",
+              SDL_GetError());
+    }
+  }
+
+  if (!surface_is_window) {
   out->egl_display = p_eglGetDisplay((EGLNativeDisplayType)out->native_window);
   if (out->egl_display == EGL_NO_DISPLAY) {
     fprintf(stderr, "eglGetDisplay falhou (err=0x%x)\n", p_eglGetError());
@@ -412,6 +472,7 @@ shim_gl_status shim_gl_init(shim_gl_ctx *out, int w, int h, const char *title) {
       return SHIM_GL_CTX_FAIL;
     }
   }
+  cfg_sel = cfg;
   const EGLint ctxAttr[] = { EGL_CONTEXT_CLIENT_VERSION, 3, EGL_NONE };
   out->egl_context = p_eglCreateContext(out->egl_display, cfg, EGL_NO_CONTEXT, ctxAttr);
   if (!out->egl_context) {
@@ -436,6 +497,7 @@ shim_gl_status shim_gl_init(shim_gl_ctx *out, int w, int h, const char *title) {
     fprintf(stderr, "eglMakeCurrent falhou (err=0x%x)\n", p_eglGetError());
     return SHIM_GL_CTX_FAIL;
   }
+  }   /* !surface_is_window */
 
   /* monta fake ANativeWindow (definido em shim_native_window.h): */
   g_win.magic        = SHIM_ANW_MAGIC;
@@ -444,9 +506,10 @@ shim_gl_status shim_gl_init(shim_gl_ctx *out, int w, int h, const char *title) {
   g_win.w = w; g_win.h = h;
   g_win.native_h     = out->native_window;
   g_win.egl_surface  = out->egl_surface;
-  g_win.egl_config   = (void*)cfg;
+  g_win.egl_config   = (void*)cfg_sel;
   g_win.egl_display  = out->egl_display;
   g_win.on_swap      = NULL;
+  g_win.surface_is_window = surface_is_window;
   out->fake = (struct ANativeWindow*)&g_win;
 
   /* ULTRAKILL_NO_SDL_GL: pipeline de apresentacao pbuffer->CPU->tela.
@@ -503,7 +566,11 @@ shim_gl_status shim_gl_init(shim_gl_ctx *out, int w, int h, const char *title) {
     }
   }
 
-  fprintf(stderr, "bridge_gl: ok %dx%d, GL ver=%s\n", w, h, gl_version_probe());
+  fprintf(stderr, "bridge_gl: ok %dx%d, GL ver=%s, present=%s\n", w, h,
+          gl_version_probe(),
+          surface_is_window ? "eglSwapBuffers do Unity na window surface do SDL"
+                            : (no_sdl_gl ? "readback pbuffer -> KMS/fb0/SDL"
+                                         : "surface EGL criada a mao"));
   return SHIM_GL_OK;
 }
 

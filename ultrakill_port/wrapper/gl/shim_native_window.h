@@ -20,8 +20,14 @@ struct shim_native_window {
   void    *native_h;                       /* X11 Window (como uintptr_t) ou wl_surface* */
   void    *egl_surface;                    /* EGLSurface pré-criado pelo bridge_gl */
   void    *egl_config;                     /* EGLConfig usado na criação */
-  void    *egl_display;                    /* EGLDisplay correspondente */
+  void    *egl_display;                   /* EGLDisplay correspondente */
   void   (*on_swap)(struct shim_native_window *);
+  /* NOVO (rev TSP 2026-11-03): 1 = egl_surface e uma WINDOW surface de verdade
+   * (criada pelo SDL sobre GBM/KMS ou o compositor), entao um eglSwapBuffers
+   * nela da flip no painel. O shim devolve essa surface ao Unity em vez de um
+   * pbuffer offscreen. campos NOVAS vao no FIM (o magic tem que ficar no
+   * offset 0 - o shim le o magic antes de confiar no resto). */
+  int      surface_is_window;
 };
 
 /* Helper inline - usado no shim e no bridge_gl. */

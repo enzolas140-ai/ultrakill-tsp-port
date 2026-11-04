@@ -27,7 +27,8 @@
 #define SHIM_UNLIKELY(x) __builtin_expect(!!(x),0)
 
 enum jref_type {
-  JT_CLASS = 1, JT_OBJECT, JT_STRING, JT_METHOD, JT_FIELD, JT_ARRAY, JT_WEAK
+  JT_CLASS = 1, JT_OBJECT, JT_STRING, JT_METHOD, JT_FIELD, JT_ARRAY, JT_WEAK,
+  JT_EVENT                    /* envelope de android/view/{Key,Motion}Event */
 };
 
 struct _jobjectRef {
@@ -150,6 +151,199 @@ static char *shim_sys_path(const char *sub) {
 static jobject new_obj(const char *cls) {
   return (jobject)ref_alloc(JT_OBJECT, cls, NULL);
 }
+
+/* =====================================================================
+ * EVENTOS VIRTUAIS - android/view/MotionEvent e android/view/KeyEvent
+ * =====================================================================
+ * O Unity 2019.4 deste build so tem UMA porta de entrada de input: o
+ * native `nativeInjectEvent (Landroid/view/InputEvent;)Z` (confirmado no
+ * log de RegisterNatives do device e na .rodata do libunity.so). Ele recebe
+ * um jobject e faz JNI em cima: GetObjectClass -> GetMethodID ->
+ * Call{Int,Long,Float,Boolean,Void}Method. Estes dois blocos fazem o papel
+ * do objeto Java: o envelope JT_EVENT aponta p/ um shim_jni_event nosso e
+ * as respostas saem dali. Nomes tratados = API publica do MotionEvent/KeyEvent
+ * (NDK), porque o Unity cacheia a lista inteira de métodos. */
+
+__attribute__((visibility("default")))
+jobject shim_jni_make_event(shim_jni_event *ev, int is_key) {
+  struct _jobjectRef *r = ref_alloc(JT_EVENT,
+                is_key ? "android/view/KeyEvent" : "android/view/MotionEvent",
+                NULL);
+  r->aux = ev;
+  return (jobject)r;
+}
+
+__attribute__((visibility("default")))
+int shim_jni_is_event(jobject o) {
+  return o && ((struct _jobjectRef*)o)->type == JT_EVENT;
+}
+
+__attribute__((visibility("default")))
+shim_jni_event *shim_jni_event_data(jobject o) {
+  if (!shim_jni_is_event(o)) return NULL;
+  return (shim_jni_event*)((struct _jobjectRef*)o)->aux;
+}
+
+/* ---- leitura dos argumentos do metodo (pelo descritor JNI) ---- */
+typedef struct { long v[3]; int n; } ev_args;
+
+static __attribute__((unused)) int ev_sig_arity(const char *sig) {
+  if (!sig || sig[0] != '(') return 0;
+  int n = 0; const char *p = sig + 1;
+  while (*p && *p != ')' && n < 3) {
+    char c = *p;
+    if (c == 'L' || c == '[') {
+      while (*p && *p != ';') p++;
+      if (*p == ';') p++;
+    } else p++;
+    n++;
+  }
+  return n;
+}
+
+static ev_args ev_args_va(const char *sig, va_list ap) {
+  ev_args a; a.n = 0; a.v[0] = a.v[1] = a.v[2] = 0;
+  const char *p = (sig && sig[0] == '(') ? sig + 1 : "";
+  for (; *p && *p != ')' && a.n < 3; a.n++) {
+    char c = *p;
+    if (c == 'L' || c == '[') {
+      while (*p && *p != ';') p++;
+      if (*p == ';') p++;
+      a.v[a.n] = (long)(intptr_t)va_arg(ap, void *);
+    } else {
+      p++;
+      if      (c == 'J') a.v[a.n] = (long)va_arg(ap, jlong);
+      else if (c == 'D') a.v[a.n] = (long)va_arg(ap, double);
+      else if (c == 'F') a.v[a.n] = (long)(float)va_arg(ap, double);
+      else               a.v[a.n] = (long)va_arg(ap, jint);
+    }
+  }
+  return a;
+}
+
+/* Variante 'A' do JNI: argumentos chegam como jvalue[] (uniao de 8 bytes). */
+typedef union { jint   i; jlong j; jfloat f; jdouble d; jobject l; } ev_jvalue;
+static ev_args ev_args_vec(const char *sig, const void *args) {
+  ev_args a; a.n = 0; a.v[0] = a.v[1] = a.v[2] = 0;
+  const char *p = (sig && sig[0] == '(') ? sig + 1 : "";
+  const ev_jvalue *v = (const ev_jvalue*)args;
+  for (; *p && *p != ')' && a.n < 3; a.n++) {
+    char c = *p;
+    if (c == 'L' || c == '[') {
+      while (*p && *p != ';') p++;
+      if (*p == ';') p++;
+      a.v[a.n] = (long)(intptr_t)(v ? v[a.n].l : NULL);
+    } else {
+      p++;
+      if      (c == 'J') a.v[a.n] = v ? (long)v[a.n].j : 0;
+      else if (c == 'F') a.v[a.n] = v ? (long)v[a.n].f : 0;
+      else if (c == 'D') a.v[a.n] = v ? (long)v[a.n].d : 0;
+      else               a.v[a.n] = v ? (long)v[a.n].i : 0;
+    }
+  }
+  return a;
+}
+
+static int ev_ptr(const shim_jni_event *ev, long idx) {
+  if (idx < 0) idx = 0;
+  if (idx >= ev->n_ptrs) idx = ev->n_ptrs > 0 ? ev->n_ptrs - 1 : 0;
+  return (int)idx;
+}
+
+/* Metodos que o Unity chama e que so precisam existir (no-op). */
+static int ev_is_void(const char *mn) {
+  static const char *const v[] = {
+    "recycle", "offsetLocation", "setLocation", "setSource", "setEdgeFlags",
+    "setAction", "setDownTime", "setEventTime", "resetState", "addBatch",
+    "writeToParcel", "setMetaState", "setFlags", "startTracking",
+    "stopTracking", "cancel", "close", NULL };
+  for (int i = 0; v[i]; i++) if (!strcmp(v[i], mn)) return 1;
+  return 0;
+}
+
+/* Resposta inteira (int/long/boolean). 1 = tratado. */
+static int ev_get_int(const shim_jni_event *ev, const char *mn,
+                      const ev_args *a, long *out) {
+  int p = a ? ev_ptr(ev, a->v[0]) : 0;
+  long axis = (a && a->n >= 1) ? a->v[0] : 0;
+  *out = 0;
+  if (!strcmp(mn, "getAction"))       { *out = ev->action; return 1; }
+  if (!strcmp(mn, "getActionMasked")) { *out = ev->action & 0xff; return 1; }
+  if (!strcmp(mn, "getActionIndex"))  { *out = (ev->action >> 8) & 0xff; return 1; }
+  if (!strcmp(mn, "getPointerCount")) { *out = ev->n_ptrs; return 1; }
+  if (!strcmp(mn, "getPointerId"))    { *out = ev->ptr[p].id; return 1; }
+  if (!strcmp(mn, "getToolType"))     { *out = ev->ptr[p].tool_type; return 1; }
+  if (!strcmp(mn, "getDeviceId"))     { *out = ev->device_id; return 1; }
+  if (!strcmp(mn, "getSource"))       { *out = ev->source; return 1; }
+  if (!strcmp(mn, "getFlags"))        { *out = ev->flags; return 1; }
+  if (!strcmp(mn, "getMetaState"))    { *out = ev->meta_state; return 1; }
+  if (!strcmp(mn, "getEdgeFlags"))    { *out = 0; return 1; }
+  if (!strcmp(mn, "getHistorySize"))  { *out = 0; return 1; }
+  if (!strcmp(mn, "getStrokeCount"))  { *out = 1; return 1; }
+  if (!strcmp(mn, "describeContents")){ *out = 0; return 1; }
+  if (!strcmp(mn, "getActionButton")) { *out = 0; return 1; }
+  if (!strcmp(mn, "isTracking"))      { *out = 0; return 1; }
+  if (!strcmp(mn, "isLongPress"))     { *out = ev->key_repeat > 0; return 1; }
+  if (!strcmp(mn, "getDownTime"))     { *out = (long)ev->down_ms; return 1; }
+  if (!strcmp(mn, "getEventTime"))    { *out = (long)ev->event_ms; return 1; }
+  if (!strcmp(mn, "getDuration"))     { *out = (long)(ev->event_ms - ev->down_ms); return 1; }
+  if (!strcmp(mn, "getKeyCode"))      { *out = ev->key_code; return 1; }
+  if (!strcmp(mn, "getScanCode"))     { *out = ev->key_scan; return 1; }
+  if (!strcmp(mn, "getRepeatCount"))  { *out = ev->key_repeat; return 1; }
+  if (!strcmp(mn, "getUnicodeChar"))  { *out = 0; return 1; }
+  if (!strcmp(mn, "getConvertedUnicodeChar")) { *out = 0; return 1; }
+  if (!strcmp(mn, "getDisplayLabel")) { *out = 0; return 1; }
+  if (!strcmp(mn, "getAxisValue"))    { *out = (axis >= 0 && axis < SHIM_JNI_MAX_AXES)
+                                               ? (long)ev->axis[axis] : 0; return 1; }
+  if (!strcmp(mn, "getToolMajor") || !strcmp(mn, "getToolMinor") ||
+      !strcmp(mn, "getTouchMajor") || !strcmp(mn, "getTouchMinor")) { *out = 0; return 1; }
+  return 0;
+}
+
+/* Resposta float. 1 = tratado. */
+static int ev_get_float(const shim_jni_event *ev, const char *mn,
+                        const ev_args *a, float *out) {
+  int p = a ? ev_ptr(ev, a->v[0]) : 0;
+  long axis = (a && a->n >= 1) ? a->v[0] : 0;
+  *out = 0.f;
+  if (!strcmp(mn, "getX"))        { *out = ev->ptr[p].x; return 1; }
+  if (!strcmp(mn, "getY"))        { *out = ev->ptr[p].y; return 1; }
+  if (!strcmp(mn, "getRawX"))     { *out = ev->ptr[p].x; return 1; }
+  if (!strcmp(mn, "getRawY"))     { *out = ev->ptr[p].y; return 1; }
+  if (!strcmp(mn, "getPressure")) { *out = ev->ptr[p].pressure; return 1; }
+  if (!strcmp(mn, "getSize"))     { *out = ev->ptr[p].size; return 1; }
+  if (!strcmp(mn, "getOrientation"))       { *out = 0.f; return 1; }
+  if (!strcmp(mn, "getXPrecision") || !strcmp(mn, "getYPrecision")) {
+    *out = 1.f; return 1; }
+  if (!strcmp(mn, "getAxisValue")) {
+    *out = (axis >= 0 && axis < SHIM_JNI_MAX_AXES) ? ev->axis[axis] : 0.f; return 1; }
+  if (!strcmp(mn, "getHistoricalX") || !strcmp(mn, "getHistoricalY") ||
+      !strcmp(mn, "getHistoricalPressure") || !strcmp(mn, "getHistoricalSize")) {
+    *out = 0.f; return 1; }   /* historySize==0, entao Unity nunca vem aqui */
+  return 0;
+}
+
+/* Loga UMA vez por nome de método de evento que nao tratamos. */
+static void ev_log_unhandled(const char *cls, const char *mn) {
+  static char seen[24][64];
+  static int n_seen = 0;
+  for (int i = 0; i < n_seen; i++)
+    if (!strcmp(seen[i], mn)) return;
+  if (n_seen < 24) { snprintf(seen[n_seen], 64, "%s", mn); n_seen++; }
+  fprintf(stderr, "JVM-event: metodo nao tratado em %s: %s (devolve 0)\n",
+          cls ? cls : "?", mn);
+}
+
+/* Nome do metodo a partir do jmethodID (que guarda "cls#name"). */
+static const char *ev_mname(jmethodID m) {
+  if (!m) return "?";
+  return mbase(((struct _jobjectRef*)m)->name);
+}
+static const char *ev_msig(jmethodID m) {
+  if (!m) return "";
+  return ((struct _jobjectRef*)m)->sig;
+}
+
 __attribute__((unused))
 static jobject clone_as(const jobject o, const char *cls) {
   struct _jobjectRef *r = (struct _jobjectRef*)o;
@@ -246,19 +440,25 @@ static jobject JNICALL j_NewObjectA(JNIEnv *e, jclass c, jmethodID m, const void
   return j_NewObject_impl(e, c, m, (const char*)a);
 }
 
-static void JNICALL j_CallVoidMethod(JNIEnv *e, jobject o, jmethodID m, ...) { (void)e;(void)o;(void)m; }
-static void JNICALL j_CallVoidMethodV(JNIEnv *e, jobject o, jmethodID m, va_list a){ (void)a; j_CallVoidMethod(e,o,m); }
-static void JNICALL j_CallVoidMethodA(JNIEnv *e, jobject o, jmethodID m, void *a)  { (void)a; j_CallVoidMethod(e,o,m); }
-static jboolean JNICALL j_CallBooleanMethod(JNIEnv *e, jobject o, jmethodID m, ...) {
-  (void)e;(void)o;
-  const char *mn = m ? mbase(((struct _jobjectRef*)m)->name) : "";
-  fprintf(stderr, "JNI bool-call: %s\n", mn);
-  if (o && !strcmp(mn, "hasNext")) return JNI_FALSE;
-  return JNI_FALSE;
+/* ---- nucleo: responde uma chamada em objeto de evento ------------------
+ * Retorna 1 (inteiro conhecido), 2 (float conhecido), 3 (no-op),
+ * 4 (desconhecido -> 0 + log unico), 0 (nao e evento nosso). */
+static int ev_lookup(jobject o, jmethodID m, ev_args a, long *out_i, float *out_f) {
+  if (out_i) *out_i = 0;
+  if (out_f) *out_f = 0.f;
+  shim_jni_event *ev = shim_jni_event_data(o);
+  if (!ev) return 0;
+  const char *mn = ev_mname(m);
+  long iv = 0; float fv = 0.f;
+  if (ev_get_int(ev, mn, &a, &iv))  { if (out_i) *out_i = iv;  if (out_f) *out_f = (float)iv; return 1; }
+  if (ev_get_float(ev, mn, &a, &fv)) { if (out_f) *out_f = fv;  if (out_i) *out_i = (long)fv;  return 2; }
+  if (ev_is_void(mn)) return 3;
+  ev_log_unhandled(((struct _jobjectRef*)o)->name, mn);
+  return 4;
 }
-static jboolean JNICALL j_CallBooleanMethodV(JNIEnv *e, jobject o, jmethodID m, va_list a){ (void)a; return j_CallBooleanMethod(e,o,m); }
-static jboolean JNICALL j_CallBooleanMethodA(JNIEnv *e, jobject o, jmethodID m, void *a){ (void)a; return j_CallBooleanMethod(e,o,m); }
-static jint JNICALL j_CallIntMethod(JNIEnv *e, jobject o, jmethodID m, ...) {
+
+/* Chamadas legacy (nao-evento) que ja eram respondidas antes. */
+static jint legacy_int(JNIEnv *e, jobject o, jmethodID m) {
   (void)e;
   if (!m) return 0;
   const char *mn = mbase(((struct _jobjectRef*)m)->name);
@@ -268,11 +468,189 @@ static jint JNICALL j_CallIntMethod(JNIEnv *e, jobject o, jmethodID m, ...) {
     return (jint)strlen(((struct _jobjectRef*)o)->name ? ((struct _jobjectRef*)o)->name : "");
   return 0;
 }
-static jint JNICALL j_CallIntMethodV(JNIEnv *e, jobject o, jmethodID m, va_list a){ (void)a; return j_CallIntMethod(e,o,m); }
-static jint JNICALL j_CallIntMethodA(JNIEnv *e, jobject o, jmethodID m, void *a)  { (void)a; return j_CallIntMethod(e,o,m); }
-static jlong JNICALL j_CallLongMethod(JNIEnv *e, jobject o, jmethodID m, ...) { (void)e;(void)o;(void)m; return 0; }
-static jlong JNICALL j_CallLongMethodV(JNIEnv *e, jobject o, jmethodID m, va_list a){ (void)a; return 0; }
-static jlong JNICALL j_CallLongMethodA(JNIEnv *e, jobject o, jmethodID m, void *a)  { (void)a; return 0; }
+
+static void JNICALL j_CallVoidMethod(JNIEnv *e, jobject o, jmethodID m, ...) {
+  (void)e; if (!o) { (void)m; return; }
+  va_list ap; va_start(ap, m); ev_args a = ev_args_va(ev_msig(m), ap); va_end(ap);
+  ev_lookup(o, m, a, NULL, NULL);
+}
+static void JNICALL j_CallVoidMethodV(JNIEnv *e, jobject o, jmethodID m, va_list ap) {
+  (void)e; if (!o) return;
+  ev_args a = ev_args_va(ev_msig(m), ap);
+  ev_lookup(o, m, a, NULL, NULL);
+}
+static void JNICALL j_CallVoidMethodA(JNIEnv *e, jobject o, jmethodID m, void *args) {
+  (void)e; if (!o) return;
+  ev_args a = ev_args_vec(ev_msig(m), args);
+  ev_lookup(o, m, a, NULL, NULL);
+}
+
+static jboolean JNICALL j_CallBooleanMethod(JNIEnv *e, jobject o, jmethodID m, ...) {
+  (void)e;
+  long r = 0;
+  if (o) {
+    va_list ap; va_start(ap, m); ev_args a = ev_args_va(ev_msig(m), ap); va_end(ap);
+    if (ev_lookup(o, m, a, &r, NULL)) return r ? JNI_TRUE : JNI_FALSE;
+  }
+  const char *mn = m ? mbase(((struct _jobjectRef*)m)->name) : "";
+  fprintf(stderr, "JNI bool-call: %s\n", mn);
+  return JNI_FALSE;
+}
+static jboolean JNICALL j_CallBooleanMethodV(JNIEnv *e, jobject o, jmethodID m, va_list ap) {
+  (void)e;
+  long r = 0;
+  if (o) {
+    ev_args a = ev_args_va(ev_msig(m), ap);
+    if (ev_lookup(o, m, a, &r, NULL)) return r ? JNI_TRUE : JNI_FALSE;
+  }
+  return JNI_FALSE;
+}
+static jboolean JNICALL j_CallBooleanMethodA(JNIEnv *e, jobject o, jmethodID m, void *args) {
+  (void)e;
+  long r = 0;
+  if (o) {
+    ev_args a = ev_args_vec(ev_msig(m), args);
+    if (ev_lookup(o, m, a, &r, NULL)) return r ? JNI_TRUE : JNI_FALSE;
+  }
+  return JNI_FALSE;
+}
+
+#define EV_CALL_INT_IMPL(ret, name, va_)                                        \
+  static ret JNICALL name(JNIEnv *e, jobject o, jmethodID m, ...) {              \
+    (void)e;                                                                     \
+    long r = 0;                                                                  \
+    if (o) { va_; if (ev_lookup(o, m, a, &r, NULL)) return (ret)r; }             \
+    return (ret)legacy_int(e, o, m);                                             \
+  }
+#define EV_CALL_INT_IMPL_V(ret, name)                                           \
+  static ret JNICALL name(JNIEnv *e, jobject o, jmethodID m, va_list ap) {       \
+    (void)e; long r = 0;                                                         \
+    if (o) { ev_args a = ev_args_va(ev_msig(m), ap);                             \
+             if (ev_lookup(o, m, a, &r, NULL)) return (ret)r; }                   \
+    return (ret)legacy_int(e, o, m);                                             \
+  }
+#define EV_CALL_INT_IMPL_A(ret, name)                                           \
+  static ret JNICALL name(JNIEnv *e, jobject o, jmethodID m, void *args) {       \
+    (void)e; long r = 0;                                                         \
+    if (o) { ev_args a = ev_args_vec(ev_msig(m), args);                           \
+             if (ev_lookup(o, m, a, &r, NULL)) return (ret)r; }                   \
+    return (ret)legacy_int(e, o, m);                                             \
+  }
+
+#define VA_ va_list ap; va_start(ap, m); ev_args a = ev_args_va(ev_msig(m), ap); va_end(ap)
+EV_CALL_INT_IMPL(jint,   j_CallIntMethod,   VA_)
+EV_CALL_INT_IMPL(jlong,  j_CallLongMethod,  VA_)
+EV_CALL_INT_IMPL(jbyte,  j_CallByteMethod,  VA_)
+EV_CALL_INT_IMPL(jchar,  j_CallCharMethod,  VA_)
+EV_CALL_INT_IMPL(jshort, j_CallShortMethod, VA_)
+EV_CALL_INT_IMPL_V(jint,   j_CallIntMethodV)
+EV_CALL_INT_IMPL_A(jint,   j_CallIntMethodA)
+EV_CALL_INT_IMPL_V(jlong,  j_CallLongMethodV)
+EV_CALL_INT_IMPL_A(jlong,  j_CallLongMethodA)
+EV_CALL_INT_IMPL_V(jbyte,  j_CallByteMethodV)
+EV_CALL_INT_IMPL_A(jbyte,  j_CallByteMethodA)
+EV_CALL_INT_IMPL_V(jchar,  j_CallCharMethodV)
+EV_CALL_INT_IMPL_A(jchar,  j_CallCharMethodA)
+EV_CALL_INT_IMPL_V(jshort, j_CallShortMethodV)
+EV_CALL_INT_IMPL_A(jshort, j_CallShortMethodA)
+#undef VA_
+
+/* Float/Double: o valor vem do evento (getX/getY/getPressure/getAxisValue). */
+static jfloat JNICALL j_CallFloatMethod(JNIEnv *e, jobject o, jmethodID m, ...) {
+  (void)e;
+  float r = 0.f;
+  if (o) {
+    va_list ap; va_start(ap, m); ev_args a = ev_args_va(ev_msig(m), ap); va_end(ap);
+    if (ev_lookup(o, m, a, NULL, &r)) return (jfloat)r;
+  }
+  return 0.f;
+}
+static jdouble JNICALL j_CallDoubleMethod(JNIEnv *e, jobject o, jmethodID m, ...) {
+  return (jdouble)j_CallFloatMethod(e, o, m, 0);
+}
+#define EVF_V(name, ret)                                                        \
+  static ret JNICALL name(JNIEnv *e, jobject o, jmethodID m, va_list ap) {       \
+    (void)e; float r = 0.f;                                                      \
+    if (o) { ev_args a = ev_args_va(ev_msig(m), ap);                             \
+             if (ev_lookup(o, m, a, NULL, &r)) return (ret)r; }                   \
+    return 0;                                                                    \
+  }
+#define EVF_A(name, ret)                                                        \
+  static ret JNICALL name(JNIEnv *e, jobject o, jmethodID m, void *args) {       \
+    (void)e; float r = 0.f;                                                      \
+    if (o) { ev_args a = ev_args_vec(ev_msig(m), args);                           \
+             if (ev_lookup(o, m, a, NULL, &r)) return (ret)r; }                   \
+    return 0;                                                                    \
+  }
+EVF_V(j_CallFloatMethodV,  jfloat)   EVF_A(j_CallFloatMethodA,  jfloat)
+EVF_V(j_CallDoubleMethodV, jdouble)  EVF_A(j_CallDoubleMethodA, jdouble)
+#undef EVF_V
+#undef EVF_A
+
+/* Nonvirtual: mesmo dispatch (nao temos hierarquia real). */
+#define EV_NV_INT(ret, name, core)                                             \
+  static ret JNICALL name(JNIEnv *e, jobject o, jclass c, jmethodID m, ...) {   \
+    (void)c; return (ret)core(e, o, m, 0);                                      \
+  }
+static jint core_int_vn(JNIEnv *e, jobject o, jmethodID m, int unused) {
+  (void)unused; return j_CallIntMethod(e, o, m);
+}
+static jlong core_long_vn(JNIEnv *e, jobject o, jmethodID m, int unused) {
+  (void)unused; return j_CallLongMethod(e, o, m);
+}
+static jfloat core_float_vn(JNIEnv *e, jobject o, jmethodID m, int unused) {
+  (void)unused; return j_CallFloatMethod(e, o, m);
+}
+static jdouble core_double_vn(JNIEnv *e, jobject o, jmethodID m, int unused) {
+  (void)unused; return j_CallDoubleMethod(e, o, m);
+}
+static jboolean core_bool_vn(JNIEnv *e, jobject o, jmethodID m, int unused) {
+  (void)unused; return j_CallBooleanMethod(e, o, m);
+}
+static jobject core_obj_vn(JNIEnv *e, jobject o, jmethodID m, int unused) {
+  (void)unused; return j_CallObjectMethod(e, o, m);
+}
+static void core_void_vn(JNIEnv *e, jobject o, jmethodID m, int unused) {
+  (void)unused; j_CallVoidMethod(e, o, m);
+}
+static jbyte  core_byte_vn(JNIEnv *e, jobject o, jmethodID m, int u){ (void)u; return (jbyte)j_CallIntMethod(e,o,m); }
+static jchar  core_char_vn(JNIEnv *e, jobject o, jmethodID m, int u){ (void)u; return (jchar)j_CallIntMethod(e,o,m); }
+static jshort core_short_vn(JNIEnv *e, jobject o, jmethodID m, int u){ (void)u; return (jshort)j_CallIntMethod(e,o,m); }
+EV_NV_INT(jint,    j_CallNonvirtualIntMethod,    core_int_vn)
+EV_NV_INT(jlong,   j_CallNonvirtualLongMethod,   core_long_vn)
+EV_NV_INT(jbyte,   j_CallNonvirtualByteMethod,   core_byte_vn)
+EV_NV_INT(jchar,   j_CallNonvirtualCharMethod,   core_char_vn)
+EV_NV_INT(jshort,  j_CallNonvirtualShortMethod,  core_short_vn)
+EV_NV_INT(jfloat,  j_CallNonvirtualFloatMethod,  core_float_vn)
+EV_NV_INT(jdouble, j_CallNonvirtualDoubleMethod, core_double_vn)
+EV_NV_INT(jboolean,j_CallNonvirtualBooleanMethod,core_bool_vn)
+EV_NV_INT(jobject, j_CallNonvirtualObjectMethod, core_obj_vn)
+#undef EV_NV_INT
+static void JNICALL j_CallNonvirtualVoidMethod(JNIEnv *e, jobject o, jclass c, jmethodID m, ...) {
+  (void)c; core_void_vn(e, o, m, 0);
+}
+/* Variantes V/A dos nonvirtual: delegam para o variadic (args sao lidos do
+ * evento so quando o Unity usa A/V; aqui passamos zero - metodos de evento
+ * com argumento via nonvirtual nao aparecem no Unity 2019.4). */
+#define EV_NV_VA(core, ret, nm)                                                 \
+  static ret JNICALL nm##V(JNIEnv *e, jobject o, jclass c, jmethodID m, va_list ap) { \
+    (void)c; (void)ap; return (ret)core(e, o, m, 0);                            \
+  }                                                                             \
+  static ret JNICALL nm##A(JNIEnv *e, jobject o, jclass c, jmethodID m, void *args) { \
+    (void)c; (void)args; return (ret)core(e, o, m, 0);                           \
+  }
+EV_NV_VA(core_int_vn,   jint,    j_CallNonvirtualIntMethod)
+EV_NV_VA(core_long_vn,  jlong,   j_CallNonvirtualLongMethod)
+EV_NV_VA(core_float_vn, jfloat,  j_CallNonvirtualFloatMethod)
+EV_NV_VA(core_bool_vn,  jboolean,j_CallNonvirtualBooleanMethod)
+EV_NV_VA(core_obj_vn,   jobject, j_CallNonvirtualObjectMethod)
+#undef EV_NV_VA
+static void JNICALL j_CallNonvirtualVoidMethodV(JNIEnv *e, jobject o, jclass c, jmethodID m, va_list ap) {
+  (void)c; (void)ap; core_void_vn(e, o, m, 0);
+}
+static void JNICALL j_CallNonvirtualVoidMethodA(JNIEnv *e, jobject o, jclass c, jmethodID m, void *args) {
+  (void)c; (void)args; core_void_vn(e, o, m, 0);
+}
 
 static jclass JNICALL j_GetObjectClass(JNIEnv *e, jobject o) {
   (void)e;
@@ -355,6 +733,45 @@ static jobject JNICALL j_CallStaticObjectMethod(JNIEnv *e, jclass c, jmethodID m
   return new_obj(cn);   /* NUNCA NULL - chamadores deref o resultado */
 }
 static void JNICALL j_CallStaticVoidMethod(JNIEnv *e, jclass c, jmethodID m, ...) { (void)e; (void)c; (void)m; }
+
+/* Variantes V/A dos estaticos que faltavam: slot NULL na vtable = branch em
+ * 0x0 = SIGSEGV (foi exatamente o que derrubou o boot em JNI_OnLoad+0x30). */
+static jobject JNICALL j_CallStaticObjectMethodV(JNIEnv *e, jclass c, jmethodID m, va_list a) {
+  (void)a; return j_CallStaticObjectMethod(e, c, m);
+}
+static jobject JNICALL j_CallStaticObjectMethodA(JNIEnv *e, jclass c, jmethodID m, void *a) {
+  (void)a; return j_CallStaticObjectMethod(e, c, m);
+}
+static jboolean JNICALL j_CallStaticBooleanMethodV(JNIEnv *e, jclass c, jmethodID m, va_list a) {
+  (void)a; return j_CallStaticBooleanMethod(e, c, m);
+}
+static jboolean JNICALL j_CallStaticBooleanMethodA(JNIEnv *e, jclass c, jmethodID m, void *a) {
+  (void)a; return j_CallStaticBooleanMethod(e, c, m);
+}
+static jlong JNICALL j_CallStaticLongMethodV(JNIEnv *e, jclass c, jmethodID m, va_list a) {
+  (void)a; return j_CallStaticLongMethod(e, c, m);
+}
+static jlong JNICALL j_CallStaticLongMethodA(JNIEnv *e, jclass c, jmethodID m, void *a) {
+  (void)a; return j_CallStaticLongMethod(e, c, m);
+}
+static jbyte  JNICALL j_CallStaticByteMethod(JNIEnv *e, jclass c, jmethodID m, ...)   { (void)e;(void)c;(void)m; return 0; }
+static jchar  JNICALL j_CallStaticCharMethod(JNIEnv *e, jclass c, jmethodID m, ...)   { (void)e;(void)c;(void)m; return 0; }
+static jshort JNICALL j_CallStaticShortMethod(JNIEnv *e, jclass c, jmethodID m, ...)  { (void)e;(void)c;(void)m; return 0; }
+static jfloat JNICALL j_CallStaticFloatMethod(JNIEnv *e, jclass c, jmethodID m, ...)  { (void)e;(void)c;(void)m; return 0; }
+static jdouble JNICALL j_CallStaticDoubleMethod(JNIEnv *e, jclass c, jmethodID m, ...){ (void)e;(void)c;(void)m; return 0; }
+#define STUB_STATIC_VA(fn, ret)                                                     \
+  static ret JNICALL fn##V(JNIEnv *e, jclass c, jmethodID m, va_list a) {            \
+    (void)a; return fn(e, c, m);                                                     \
+  }                                                                                 \
+  static ret JNICALL fn##A(JNIEnv *e, jclass c, jmethodID m, void *a) {              \
+    (void)a; return fn(e, c, m);                                                     \
+  }
+STUB_STATIC_VA(j_CallStaticByteMethod,  jbyte)
+STUB_STATIC_VA(j_CallStaticCharMethod,  jchar)
+STUB_STATIC_VA(j_CallStaticShortMethod, jshort)
+STUB_STATIC_VA(j_CallStaticFloatMethod, jfloat)
+STUB_STATIC_VA(j_CallStaticDoubleMethod, jdouble)
+#undef STUB_STATIC_VA
 
 /* Variantes V/A só delegam pro variadic (nós ignoramos args) */
 static jint JNICALL j_CallStaticIntMethodV(JNIEnv *e, jclass c, jmethodID m, va_list a) { (void)a; return j_CallStaticIntMethod(e,c,m); }
@@ -718,18 +1135,70 @@ static const struct JNINativeInterface_ g_env_vtable = {
   .CallBooleanMethod = j_CallBooleanMethod,
   .CallBooleanMethodV = j_CallBooleanMethodV,
   .CallBooleanMethodA = j_CallBooleanMethodA,
+  .CallByteMethod = j_CallByteMethod,
+  .CallByteMethodV = j_CallByteMethodV,
+  .CallByteMethodA = j_CallByteMethodA,
+  .CallCharMethod = j_CallCharMethod,
+  .CallCharMethodV = j_CallCharMethodV,
+  .CallCharMethodA = j_CallCharMethodA,
+  .CallShortMethod = j_CallShortMethod,
+  .CallShortMethodV = j_CallShortMethodV,
+  .CallShortMethodA = j_CallShortMethodA,
   .CallIntMethod = j_CallIntMethod,
   .CallIntMethodV = j_CallIntMethodV,
   .CallIntMethodA = j_CallIntMethodA,
+  .CallLongMethod = j_CallLongMethod,
+  .CallLongMethodV = j_CallLongMethodV,
+  .CallLongMethodA = j_CallLongMethodA,
+  .CallFloatMethod = j_CallFloatMethod,
+  .CallFloatMethodV = j_CallFloatMethodV,
+  .CallFloatMethodA = j_CallFloatMethodA,
+  .CallDoubleMethod = j_CallDoubleMethod,
+  .CallDoubleMethodV = j_CallDoubleMethodV,
+  .CallDoubleMethodA = j_CallDoubleMethodA,
   .CallVoidMethod = j_CallVoidMethod,
   .CallVoidMethodV = j_CallVoidMethodV,
   .CallVoidMethodA = j_CallVoidMethodA,
-  /* nonvirtual + char/byte/short/long/float/double: NULL (Unity nao usa) */
+  /* Nonvirtual: mesmo dispatcher (o shim nao tem hierarquia de classes). */
+  .CallNonvirtualObjectMethod = j_CallNonvirtualObjectMethod,
+  .CallNonvirtualObjectMethodV = j_CallNonvirtualObjectMethodV,
+  .CallNonvirtualObjectMethodA = j_CallNonvirtualObjectMethodA,
+  .CallNonvirtualBooleanMethod = j_CallNonvirtualBooleanMethod,
+  .CallNonvirtualBooleanMethodV = j_CallNonvirtualBooleanMethodV,
+  .CallNonvirtualBooleanMethodA = j_CallNonvirtualBooleanMethodA,
+  .CallNonvirtualByteMethod = j_CallNonvirtualByteMethod,
+  .CallNonvirtualCharMethod = j_CallNonvirtualCharMethod,
+  .CallNonvirtualShortMethod = j_CallNonvirtualShortMethod,
+  .CallNonvirtualIntMethod = j_CallNonvirtualIntMethod,
+  .CallNonvirtualIntMethodV = j_CallNonvirtualIntMethodV,
+  .CallNonvirtualIntMethodA = j_CallNonvirtualIntMethodA,
+  .CallNonvirtualLongMethod = j_CallNonvirtualLongMethod,
+  .CallNonvirtualLongMethodV = j_CallNonvirtualLongMethodV,
+  .CallNonvirtualLongMethodA = j_CallNonvirtualLongMethodA,
+  .CallNonvirtualFloatMethod = j_CallNonvirtualFloatMethod,
+  .CallNonvirtualFloatMethodV = j_CallNonvirtualFloatMethodV,
+  .CallNonvirtualFloatMethodA = j_CallNonvirtualFloatMethodA,
+  .CallNonvirtualDoubleMethod = j_CallNonvirtualDoubleMethod,
+  .CallNonvirtualDoubleMethodV = j_CallNonvirtualDoubleMethodV,
+  .CallNonvirtualVoidMethod = j_CallNonvirtualVoidMethod,
+  .CallNonvirtualVoidMethodV = j_CallNonvirtualVoidMethodV,
+  .CallNonvirtualVoidMethodA = j_CallNonvirtualVoidMethodA,
   .GetFieldID = j_GetFieldID,
   .GetObjectField = j_GetObjectField,
   .GetIntField = j_GetIntField,
+  .GetLongField = j_GetLongField,
+  .GetBooleanField = j_GetBooleanField,
+  .GetByteField = j_GetByteField,
+  .GetCharField = j_GetCharField,
+  .GetShortField = j_GetShortField,
+  .GetFloatField = j_GetFloatField,
+  .GetDoubleField = j_GetDoubleField,
   .SetObjectField = j_SetObjectField,
   .SetIntField = j_SetIntField,
+  .SetLongField = j_SetLongField,
+  .SetBooleanField = j_SetBooleanField,
+  .SetFloatField = j_SetFloatField,
+  .SetDoubleField = j_SetDoubleField,
   .GetStaticMethodID = j_GetStaticMethodID,
   .CallStaticIntMethod = j_CallStaticIntMethod,
   .CallStaticIntMethodV = j_CallStaticIntMethodV,
@@ -738,8 +1207,29 @@ static const struct JNINativeInterface_ g_env_vtable = {
   .CallStaticVoidMethodV = j_CallStaticVoidMethodV,
   .CallStaticVoidMethodA = j_CallStaticVoidMethodA,
   .CallStaticObjectMethod = j_CallStaticObjectMethod,
+  .CallStaticObjectMethodV = j_CallStaticObjectMethodV,
+  .CallStaticObjectMethodA = j_CallStaticObjectMethodA,
   .CallStaticBooleanMethod = j_CallStaticBooleanMethod,
+  .CallStaticBooleanMethodV = j_CallStaticBooleanMethodV,
+  .CallStaticBooleanMethodA = j_CallStaticBooleanMethodA,
   .CallStaticLongMethod = j_CallStaticLongMethod,
+  .CallStaticLongMethodV = j_CallStaticLongMethodV,
+  .CallStaticLongMethodA = j_CallStaticLongMethodA,
+  .CallStaticByteMethod = j_CallStaticByteMethod,
+  .CallStaticByteMethodV = j_CallStaticByteMethodV,
+  .CallStaticByteMethodA = j_CallStaticByteMethodA,
+  .CallStaticCharMethod = j_CallStaticCharMethod,
+  .CallStaticCharMethodV = j_CallStaticCharMethodV,
+  .CallStaticCharMethodA = j_CallStaticCharMethodA,
+  .CallStaticShortMethod = j_CallStaticShortMethod,
+  .CallStaticShortMethodV = j_CallStaticShortMethodV,
+  .CallStaticShortMethodA = j_CallStaticShortMethodA,
+  .CallStaticFloatMethod = j_CallStaticFloatMethod,
+  .CallStaticFloatMethodV = j_CallStaticFloatMethodV,
+  .CallStaticFloatMethodA = j_CallStaticFloatMethodA,
+  .CallStaticDoubleMethod = j_CallStaticDoubleMethod,
+  .CallStaticDoubleMethodV = j_CallStaticDoubleMethodV,
+  .CallStaticDoubleMethodA = j_CallStaticDoubleMethodA,
   .GetStaticFieldID = j_GetStaticFieldID,
   .GetStaticIntField = j_GetStaticIntField,
   .GetStaticBooleanField = j_GetStaticBooleanField,
