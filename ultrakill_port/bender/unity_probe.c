@@ -6729,8 +6729,32 @@ static void bender_uk_glFinish(void){typedef void(*Fn)(void);Fn f=(Fn)bender_gl_
  * Implementacao com ioctls do UAPI do kernel (sem dependencia de libdrm no device).
  * ULTRAKILL_DRM_PRESENT=0 desliga. Cada passo falha a logar errno, para a proxima
  * leitura do log dizer ja se o problema e master negado ou outro modo/timing. */
-#include <drm/drm.h>
-#include <drm/drm_mode.h>
+/* Nota (build #137 falhou): no Debian o libdrm-dev instala os headers do UAPI DRM
+ * em /usr/include/libdrm/, nao em /usr/include/drm/. Os dois caminhos sao tentados,
+ * para o build nao depender do layout do container. Usamos so ioctls crus - NAO ha
+ * ligacao a libdrm, portanto nada novo e preciso no device. */
+#if defined(__has_include)
+#  if __has_include(<drm/drm.h>)
+#    include <drm/drm.h>
+#    include <drm/drm_mode.h>
+#  elif __has_include(<libdrm/drm.h>)
+#    include <libdrm/drm.h>
+#    include <libdrm/drm_mode.h>
+#  else
+#    define BENDER_NO_DRM 1
+#  endif
+#else
+#  include <libdrm/drm.h>
+#  include <libdrm/drm_mode.h>
+#endif
+#ifndef DRM_IOCTL_SET_MASTER
+#  define BENDER_NO_DRM 1
+#endif
+
+#ifdef BENDER_NO_DRM
+static int uk_drm_init(void){ g_drm_off = 1; uk_log("[BENDER_UK_DRM] headers DRM ausentes no build; present por DRM desativado\n"); return -1; }
+static void uk_drm_present(const unsigned char *argb, int w, int h){ (void)argb;(void)w;(void)h; }
+#else
 
 static int      g_drm_fd = -1;
 static unsigned g_drm_crtc = 0, g_drm_conn = 0, g_drm_fb = 0, g_drm_pitch = 0;
@@ -6876,6 +6900,7 @@ static void uk_drm_present(const unsigned char *argb, int w, int h) {
     if (++g_drm_flips <= 3ul || g_drm_flips % 300ul == 0ul)
         uk_log("[BENDER_UK_DRM] flip #%lu %ux%u (fonte %dx%d)\n", g_drm_flips, g_drm_w, g_drm_h, w, h);
 }
+#endif  /* BENDER_NO_DRM */
 
 /* ULTRAKILL fix -N: present por framebuffer para o caminho COM SDL.
  * O blit para /dev/fb0 ja existia, mas so era chamado dentro de
