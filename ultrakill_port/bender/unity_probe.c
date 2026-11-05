@@ -6024,6 +6024,16 @@ static void uk_test_pattern(unsigned char *base, unsigned w, unsigned h, unsigne
     }
 }
 
+/* ULTRAKILL fix -S: paginação e dimensionamento do readback. O log de 05/11 08:37
+ * mostrou o quadro real (bytes_nao_zero ~27%, 600 presents na thread do Unity) mas
+ * com dois defeitos: (1) lemos 640x360 de um backbuffer de 1280x720 -> so um canto
+ * ampliado = 'monte de pedacos do jogo'; (2) escrevemos SEMPRE na pagina 0 do fb,
+ * e se o CRTC esta a varrer a pagina 1 (yres_virtual = 2*yres) a tela fica PRETA
+ * enquanto a captura mostra os fragmentos. Estas variaveis resolvem os dois. */
+static struct fb_var_screeninfo g_uk_var;
+static size_t g_uk_page_bytes;
+static unsigned g_uk_page, g_uk_double, g_uk_cap_w, g_uk_cap_h;
+
 static int uk_fb_init(int src_w, int src_h) {
     struct fb_var_screeninfo var;
     struct fb_fix_screeninfo finfo;
@@ -6051,6 +6061,13 @@ static int uk_fb_init(int src_w, int src_h) {
         }
     }
     g_uk_w = var.xres; g_uk_h = var.yres; g_uk_pitch = finfo.line_length; g_uk_bpp = var.bits_per_pixel;
+    g_uk_var = var;
+    g_uk_page_bytes = (size_t)finfo.line_length * (size_t)var.yres;
+    g_uk_double = (var.yres_virtual >= 2u * var.yres) ? 1u : 0u;
+    /* capacity: o maior entre o painel e o pedido, com teto obvio em 1280x720 para
+     * nao estourar no readback (o buffer e alocado por isto). */
+    g_uk_cap_w = var.xres > 1280u ? var.xres : 1280u;
+    g_uk_cap_h = var.yres > 720u ? var.yres : 720u;
     g_uk_ro = var.red.offset; g_uk_go = var.green.offset; g_uk_bo = var.blue.offset;
     g_uk_rl = var.red.length ? var.red.length : 8;
     g_uk_gl = var.green.length ? var.green.length : 8;
@@ -6063,9 +6080,22 @@ static int uk_fb_init(int src_w, int src_h) {
         uk_log("[BENDER_UK_PRESENT] fb0: mmap de %zu falhou: %s\n", g_uk_fblen, strerror(errno));
         return -1;
     }
-    g_uk_buf = (unsigned char *)malloc((size_t)src_w * (size_t)src_h * 4u);
-    if (!g_uk_buf) g_uk_buf = (unsigned char *)malloc(640u * 480u * 4u);
+    g_uk_buf = (unsigned char *)malloc((size_t)g_uk_cap_w * (size_t)g_uk_cap_h * 4u);
+    if (!g_uk_buf) g_uk_buf = (unsigned char *)malloc(1280u * 720u * 4u);
     if (!g_uk_buf) { uk_log("[BENDER_UK_PRESENT] sem buffer de readback\n"); return -1; }
+    /* forca a pagina visivel para 0 no arranque, senao comecamos a escrever numa
+     * pagina que pode nao ser a que esta a ser varrida. */
+    if (g_uk_double) {
+        g_uk_var.yoffset = 0;
+        if (ioctl(g_uk_fbfd, FBIOPAN_DISPLAY, &g_uk_var) == 0) {
+            uk_log("[BENDER_UK_PRESENT] fb duplo: yres_virtual=%u pagina=%zu -> pan yoffset=0 OK\n",
+                   g_uk_var.yres_virtual, g_uk_page_bytes);
+        } else {
+            uk_log("[BENDER_UK_PRESENT] fb duplo: FBIOPAN falhou (%s); escrevemos na pagina 0\n", strerror(errno));
+        }
+    }
+    uk_log("[BENDER_UK_PRESENT] painel=%ux%u virtual=%u pitch=%u bpp=%u duplo=%u buffer=%ux%u\n",
+           g_uk_w, g_uk_h, g_uk_var.yres_virtual, g_uk_pitch, g_uk_bpp, g_uk_double, g_uk_cap_w, g_uk_cap_h);
     uk_log("[BENDER_UK_PRESENT] backend=fb0 %ux%u bpp=%u pitch=%u (source %dx%d) - CRTC intacto\n",
            g_uk_w, g_uk_h, g_uk_bpp, g_uk_pitch, src_w, src_h);
     uk_test_pattern((unsigned char *)g_uk_fbmap, g_uk_w, g_uk_h, g_uk_pitch);
@@ -6088,12 +6118,16 @@ static void *uk_gl_addr(const char *name) {
 static void uk_fb_blit(const unsigned char *rgba, int sw, int sh) {
     unsigned char *base = (unsigned char *)g_uk_fbmap;
     unsigned y, x;
+    /* fix -S: escreve na pagina de tras (g_uk_page ja aponta para ela) - senao, com
+     * fb de duas paginas, pintamos uma pagina que o CRTC nao esta a mostrar. */
+    if (g_uk_double && g_uk_page_bytes && g_uk_page)
+        base += g_uk_page_bytes;
     for (y = 0; y < g_uk_h; y++) {
         unsigned sy = (unsigned)((unsigned long long)y * (unsigned long long)sh / (g_uk_h ? g_uk_h : 1));
         unsigned char *drow;
         const unsigned char *srow;
         if (sy >= (unsigned)sh) sy = sh - 1;
-        if ((size_t)y * g_uk_pitch + (size_t)g_uk_w * (g_uk_bpp / 8u) > g_uk_fblen) break;
+        if ((size_t)(base - (unsigned char *)g_uk_fbmap) + (size_t)y * g_uk_pitch + (size_t)g_uk_w * (g_uk_bpp / 8u) > g_uk_fblen) break;
         srow = rgba + (size_t)sy * (size_t)sw * 4u;
         drow = base + (size_t)y * g_uk_pitch;
         for (x = 0; x < g_uk_w; x++) {
@@ -6280,7 +6314,17 @@ static void uk_present(int w, int h) {
 
 present:
     if (g_uk_bind_fbo) g_uk_bind_fbo(UK_GL_READ_FRAMEBUFFER, (unsigned)saved);
+    /* fix -S: escreve na pagina do fundo e depois vira o CRTC para ela. */
+    if (g_uk_double && g_uk_page_bytes) g_uk_page ^= 1u;
     uk_fb_blit(g_uk_buf, w, h);
+    if (g_uk_double && g_uk_page_bytes) {
+        g_uk_var.yoffset = (unsigned)(g_uk_page * (g_uk_page_bytes / (g_uk_pitch ? g_uk_pitch : 1u)));
+        if (ioctl(g_uk_fbfd, FBIOPAN_DISPLAY, &g_uk_var) != 0) {
+            static int pan_warned;
+            if (!pan_warned) { pan_warned = 1; uk_log("[BENDER_UK_PRESENT] FBIOPAN falhou (%s); sem flip\n", strerror(errno)); }
+            g_uk_double = 0;
+        }
+    }
     g_uk_present_calls++;
     if (g_uk_present_calls <= 5ul || g_uk_present_calls % 300ul == 0ul) {
         for (k = 0; k < total; k++) if (g_uk_buf[k]) nz++;
@@ -6332,14 +6376,27 @@ static void uk_fb_present_frame(int w,int h){
     if(ew&&*ew)W=atoi(ew);
     if(eh&&*eh)H=atoi(eh);
     if(W<=0||H<=0){
+        /* fix -S: o tamanho tem de ser o que o GL esta mesmo a desenhar (viewport),
+         * nao o do nosso ANativeWindow fake (640x360). Ler 640x360 dum backbuffer de
+         * 1280x720 da um canto ampliado - e o 'monte de pedacos do jogo' reportado. */
+        int vp[4] = {0,0,0,0};
+        uk_gl_syms();
+        if (g_uk_get_integerv) g_uk_get_integerv(0x0BA2u /*GL_VIEWPORT*/, vp);
+        if (vp[2] > 0 && vp[3] > 0) { W = vp[2]; H = vp[3]; }
+    }
+    if(W<=0||H<=0){
         W=g_native_window.width>0?g_native_window.width:g_bender_sdl_draw_w;
         H=g_native_window.height>0?g_native_window.height:g_bender_sdl_draw_h;
     }
     if(W<=0||H<=0)return;
-    static int iw=0,ih=0;
-    if(iw==0){ uk_present_init(W,H); iw=W; ih=H; }
-    if(W>iw)W=iw;
-    if(H>ih)H=ih;
+    if(g_uk_cap_w && W>(int)g_uk_cap_w)W=(int)g_uk_cap_w;
+    if(g_uk_cap_h && H>(int)g_uk_cap_h)H=(int)g_uk_cap_h;
+    /* fix -S: o buffer e alocado na CAPACIDADE do painel (uk_fb_init), entao o
+     * tamanho do readback pode mudar entre frames sem estourar memoria - por isso
+     * NAO congelamos mais o tamanho no primeiro init (antes, o primeiro vinha do
+     * frame loop sem contexto = 640x360 e prendia o resto da sessao). */
+    static int inited=0;
+    if(!inited){ uk_present_init(W,H); inited=1; }
     uk_present(W,H);
     /* fix -P: alem do /dev/fb0, tenta o caminho do SDL (blit FBO->FB0+swap).
      * Se o painel for varrido pelo SDL/mali (como no Cuphead), e aqui que aparece. */
