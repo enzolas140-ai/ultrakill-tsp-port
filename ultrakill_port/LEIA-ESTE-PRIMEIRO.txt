@@ -779,3 +779,38 @@ PROVA NO CODIGO (auditor): python3 tools/audit_port.py checa como invariante que
  - o entry tem log proprio (ultrakill/entry.log), self-heal, teto de timeout e
    escrita em /dev/tty0 opt-in.
 Este checker existe porque esse bug NUNCA aparece em log: a vitima e a ES.
+
+=======================================================================
+13) ANDAMENTO DO VIDEO - o jogo JA renderiza (05/11, builds #124/#125)
+=======================================================================
+O que ja esta provado no log (05/11 08:37):
+ - shim/libEGL: CARREGADO  -> o shim esta no processo (libunity declara
+   NEEDED libEGL.so, sem '.1', que e o SONAME do nosso shim)
+ - [BENDER_UK_FLUSH_PRESENT] n=1..600 -> o present acontece na THREAD do Unity,
+   com o contexto dele corrente (unico lugar onde da para ler o quadro)
+ - readback=640x360 bytes_zero=670173/921600 -> ~27% dos pixels tem IMAGEM REAL
+   (antes eram 100% zero). O jogo renderiza.
+ - mas o painel continuava preto com 'pedacos de jogo' na captura.
+
+Dois defeitos explicados e corrigidos (fix -S, builds #124/#125):
+ 1) TAMANHO: leamos 640x360 (o do nosso ANativeWindow fake) de um backbuffer de
+    1280x720 -> so um canto, ampliado = 'monte de pedacos'. Agora o tamanho vem
+    do GL_VIEWPORT real, e o buffer e alocado na capacidade do painel (1280x720).
+    Tambem removemos o congelamento do tamanho no 1o init (o 1o vinha do frame
+    loop sem contexto = 640x360 e prendia a sessao inteira).
+ 2) PAGINA: escreviamos sempre na pagina 0 do fb. Com yres_virtual = 2*yres o
+    CRTC pode estar a varrer a pagina 1 -> tela PRETA com som, e a captura mostra
+    os fragmentos. Agora: deteta fb duplo, escreve na pagina de tras, faz
+    FBIOPAN_DISPLAY para ela (page flip em fbdev) e, se o pan falhar, passa a
+    escrever sempre na pagina 0 sem flip. No arranque forza yoffset=0.
+
+Por que o present nao e no swap: o Unity NUNCA chama eglSwapBuffers aqui
+(shim carregado e zero 'libEGL: swap'; guest_swaps=0 para sempre). Entao
+apresentamos nos calls GL dele: glFlush/glFinish e glBindFramebuffer(target,0),
+com teto de ~35/s (BENDER_UK_FLUSH_PRESENT=0 desliga).
+Knobs: BENDER_UK_FB / BENDER_UK_BLIT_SDL / ULTRAKILL_SHIM_FB / BENDER_UK_WINDOW_W,H
+       ULTRAKILL_INTERNAL_W,H / ULTRAKILL_FB_DEVICE (ver ultrakill.conf)
+O que procurar agora no unity_probe.log:
+  [BENDER_UK_PRESENT] painel=1280x720 virtual=... duplo=... buffer=1280x720
+  [BENDER_UK_PRESENT] frame=N readback=1280x720 fbo=... bytes_zero=...
+  [BENDER_UK_PRESENT] FBIOPAN falhou (...)   <- so se o flip nao for suportado

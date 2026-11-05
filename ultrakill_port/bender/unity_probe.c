@@ -5994,8 +5994,9 @@ static unsigned  g_uk_w, g_uk_h, g_uk_pitch, g_uk_bpp;
 static unsigned  g_uk_ro, g_uk_go, g_uk_bo, g_uk_rl, g_uk_gl, g_uk_bl;
 static unsigned char *g_uk_buf;
 static UkReadPixelsFn g_uk_read;
-static unsigned long  g_uk_present_calls;
+static unsigned long g_uk_present_calls;
 static int            g_uk_off;
+static int            g_uk_vp_tmp[4];
 
 static void uk_log(const char *fmt, ...) {
     char line[512];
@@ -6160,14 +6161,18 @@ static void uk_fb_blit(const unsigned char *rgba, int sw, int sh) {
  * Estes helpers resolvem os dois: garantem contexto SOb se (e somente se) nao ha
  * nenhum, para nao roubar o contexto do GfxDevice thread do Unity, e descobrem
  * qual FBO tem conteudo de verdade, usando-o como fonte dos frames seguintes. */
-typedef void  (*UkGetIntegerVFn)(unsigned, int *);
-typedef void  (*UkBindFramebufferFn)(unsigned, unsigned);
+typedef void (*UkGetIntegerVFn)(unsigned, int *);
+typedef void (*UkBindFramebufferFn)(unsigned, unsigned);
 typedef const unsigned char *(*UkGetStringFn)(unsigned);
+typedef void (*UkGetFboAttachFn)(unsigned, unsigned, unsigned, int *);
+typedef unsigned int (*UkCheckFboFn)(unsigned);
 static UkGetIntegerVFn    g_uk_get_integerv;
 static UkBindFramebufferFn g_uk_bind_fbo;
 static UkGetStringFn      g_uk_get_string;
+static UkGetFboAttachFn   g_uk_fbo_param;
+static UkCheckFboFn       g_uk_check_fbo;
 static unsigned g_uk_src_fbo;      /* 0 = framebuffer padrao */
-static int      g_uk_probe_left = 6;   /* tentativas de descoberta de FBO */
+static int      g_uk_probe_left = 14;  /* varreduras de fonte (fix -T) */
 static int      g_uk_ctx_announced;
 #define UK_GL_READ_FRAMEBUFFER   0x8CA8u
 #define UK_GL_DRAW_FRAMEBUFFER   0x8CA9u
@@ -6225,9 +6230,45 @@ static void uk_gl_syms(void){
     if(!g_uk_get_integerv)  g_uk_get_integerv  = (UkGetIntegerVFn)uk_gl_addr("glGetIntegerv");
     if(!g_uk_bind_fbo)      g_uk_bind_fbo      = (UkBindFramebufferFn)uk_gl_addr("glBindFramebuffer");
     if(!g_uk_get_string)    g_uk_get_string    = (UkGetStringFn)uk_gl_addr("glGetString");
+    if(!g_uk_fbo_param)     g_uk_fbo_param     = (UkGetFboAttachFn)uk_gl_addr("glGetFramebufferAttachmentParameteriv");
+    if(!g_uk_check_fbo)     g_uk_check_fbo     = (UkCheckFboFn)uk_gl_addr("glCheckFramebufferStatus");
+}
+/* ULTRAKILL fix -T: tamanho REAL de um framebuffer (0 = janela). No log de 05/11
+ * 08:45 o readback veio 480x270 = o render target ESCALADO do proprio Unity, lido
+ * do FB0 (errado). Sem saber o tamanho do FBO, a leitura apanha so um canto. */
+static int uk_fbo_size(unsigned id,int *w,int *h){
+    int vw=0,vh=0;
+    *w=0;*h=0;
+    if(!g_uk_fbo_param||!g_uk_bind_fbo)return 0;
+    g_uk_bind_fbo(UK_GL_READ_FRAMEBUFFER,id);
+    g_uk_fbo_param(UK_GL_READ_FRAMEBUFFER,0x8CE0u /*GL_COLOR_ATTACHMENT0*/,0x8734u,&vw); /* FRAMEBUFFER_WIDTH */
+    g_uk_fbo_param(UK_GL_READ_FRAMEBUFFER,0x8CE0u,0x8735u,&vh);                            /* FRAMEBUFFER_HEIGHT */
+    if(vw<=0||vh<=0){
+        /* FB0 nao tem essas props; usa a janela drawable / viewport */
+        if(g_uk_get_integerv){g_uk_get_integerv(0x0BA2u,(int*)g_uk_vp_tmp);vw=g_uk_vp_tmp[2];vh=g_uk_vp_tmp[3];}
+    }
+    if(vw<=0||vh<=0)return 0;
+    *w=vw;*h=vh;return 1;
+}
+static int uk_fbo_ok(unsigned id){
+    if(id==0u)return 1;
+    if(!g_uk_check_fbo)return 1;
+    /* glCheckFramebufferStatus depende do target bindado */
+    if(g_uk_bind_fbo)g_uk_bind_fbo(UK_GL_FRAMEBUFFER,id);
+    unsigned st=g_uk_check_fbo(UK_GL_FRAMEBUFFER);
+    if(g_uk_bind_fbo)g_uk_bind_fbo(UK_GL_FRAMEBUFFER,0u);
+    return st==0u||st==0x8CD5u; /* 0 = sem contexto; GL_FRAMEBUFFER_COMPLETE=0x8CD5 */
+}
+/* Pontuacao 0..1000 por amostragem (1 byte a cada 51). Barato e comparavel. */
+static int uk_score(const unsigned char *b,size_t n){
+    size_t k,hits=0,tot=0;
+    if(!b||n<1024u)return 0;
+    for(k=0;k+51u<n;k+=51u){ tot++; if(b[k]) hits++; }
+    if(!tot)return 0;
+    return (int)(hits*1000ul/tot);
 }
 /* Varredura esbocada: 1 byte a cada 997. Barato e suficiente para 'tem imagem'. */
-static int uk_buf_has_content(const unsigned char *b, size_t n){
+static int __attribute__((unused)) uk_buf_has_content(const unsigned char *b, size_t n){
     size_t k;
     for(k = 0; k < n; k += 997u) if(b[k]) return 1;
     return 0;
@@ -6283,34 +6324,45 @@ static void uk_present(int w, int h) {
         g_uk_get_integerv(UK_GL_FRAMEBUFFER_BINDING, &saved);
     total = (size_t)w * (size_t)h * 4u;
 
-    /* 1) fonte conhecida (FBO descoberto ou o padrao) */
-    if (g_uk_bind_fbo) g_uk_bind_fbo(UK_GL_READ_FRAMEBUFFER, g_uk_src_fbo);
-    g_uk_read(0, 0, w, h, 0x1908 /*GL_RGBA*/, 0x1401 /*GL_UNSIGNED_BYTE*/, g_uk_buf);
-    if (uk_buf_has_content(g_uk_buf, total)) goto present;
-
-    /* 2) vazio: procure um FBO que tenha imagem (o backbuffer do Unity). So nos
-     * primeiros frames e poucas tentativas, para nao pesar em 30 FPS. */
-    if (g_uk_probe_left > 0 && g_uk_bind_fbo) {
-        unsigned id;
-        g_uk_probe_left--;
-        for (id = 1u; id <= 64u; id++) {
-            g_uk_bind_fbo(UK_GL_READ_FRAMEBUFFER, id);
-            g_uk_read(0, 0, w, h, 0x1908, 0x1401, g_uk_buf);
-            if (uk_buf_has_content(g_uk_buf, total)) {
-                g_uk_src_fbo = id;
-                uk_log("[BENDER_UK_PRESENT][FBO] fonte encontrada: GL_READ_FRAMEBUFFER=%u (%dx%d) - usando como quadro\n", id, w, h);
-                goto present;
+    /* fix -T: escolha da FONTE por PONTUACAO. Antes bastava 'qualquer byte
+     * nao-zero' no FB0 para aceitar - e como o FB0 tinha ~10% de resto de clear,
+     * o render target real do Unity nunca era procurado (log 08:45: fbo=0,
+     * readback 480x270). Varre FB0 + FBOs 1..64, mede o tamanho real de cada um e
+     * fica com o que tiver mais conteudo. So nos primeiros frames. */
+    {
+        size_t cap = (size_t)g_uk_cap_w * (size_t)g_uk_cap_h * 4u;
+        if (g_uk_probe_left > 0 && g_uk_bind_fbo && g_uk_fbo_param) {
+            unsigned id, best = g_uk_src_fbo;
+            int best_sc = -1, bw = w, bh = h;
+            g_uk_probe_left--;
+            for (id = 0u; id <= 64u; id++) {
+                int rw = 0, rh = 0;
+                if (!uk_fbo_ok(id)) continue;
+                if (!uk_fbo_size(id, &rw, &rh)) continue;
+                if (rw <= 0 || rh <= 0) continue;
+                if ((size_t)rw * (size_t)rh * 4u > cap) continue;
+                g_uk_bind_fbo(UK_GL_READ_FRAMEBUFFER, id);
+                g_uk_read(0, 0, rw, rh, 0x1908, 0x1401, g_uk_buf);
+                int sc = uk_score(g_uk_buf, (size_t)rw * (size_t)rh * 4u);
+                if (sc > best_sc) { best_sc = sc; best = id; bw = rw; bh = rh; }
+            }
+            if (best_sc > 0) {
+                g_uk_src_fbo = best; w = bw; h = bh;
+                uk_log("[BENDER_UK_PRESENT][FBO] fonte escolhida: fbo=%u %dx%d score=%d/1000\n",
+                       best, w, h, best_sc);
             }
         }
-        g_uk_bind_fbo(UK_GL_READ_FRAMEBUFFER, g_uk_src_fbo);
-        g_uk_read(0, 0, w, h, 0x1908, 0x1401, g_uk_buf);
-        if (uk_buf_has_content(g_uk_buf, total)) goto present;
-        uk_log("[BENDER_UK_PRESENT][FBO] nenhum FBO 1..64 com conteudo; tentativas restantes=%d\n", g_uk_probe_left);
+    }
+    if (g_uk_bind_fbo) g_uk_bind_fbo(UK_GL_READ_FRAMEBUFFER, g_uk_src_fbo);
+    total = (size_t)w * (size_t)h * 4u;
+    g_uk_read(0, 0, w, h, 0x1908 /*GL_RGBA*/, 0x1401 /*GL_UNSIGNED_BYTE*/, g_uk_buf);
+    if (uk_score(g_uk_buf, total) < 3) {
+        /* sem imagem util: nao bata lixo no painel */
         if (g_uk_bind_fbo) g_uk_bind_fbo(UK_GL_READ_FRAMEBUFFER, (unsigned)saved);
-        return;   /* nao bata lixo preto no painel */
+        return;
     }
     if (g_uk_bind_fbo) g_uk_bind_fbo(UK_GL_READ_FRAMEBUFFER, (unsigned)saved);
-    return;
+    goto present;
 
 present:
     if (g_uk_bind_fbo) g_uk_bind_fbo(UK_GL_READ_FRAMEBUFFER, (unsigned)saved);
