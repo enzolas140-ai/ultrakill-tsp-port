@@ -6276,6 +6276,16 @@ static int uk_score(const unsigned char *b,size_t n){
     if(!tot)return 0;
     return (int)(hits*1000ul/tot);
 }
+/* ULTRAKILL fix -W: checksum de amostras. O score engana em conteudo ESCURO (o
+ * menu do ULTRAKILL e quase todo preto -> poucos bytes nao-zero NAO significa
+ * ausencia de imagem). Se o cksum MUDA entre frames, tem jogo ali; se e constante,
+ * e memoria nao inicializada do driver. */
+static unsigned uk_cksum(const unsigned char *b,size_t n){
+    size_t k; unsigned h=2166136261u;
+    if(!b||n<4u)return 0;
+    for(k=0;k+3u<n;k+=4093u){ h=(h^(unsigned)b[k])*(16777619u); h=(h^(unsigned)b[k+2u])*(16777619u); }
+    return h;
+}
 /* Varredura esbocada: 1 byte a cada 997. Barato e suficiente para 'tem imagem'. */
 static int __attribute__((unused)) uk_buf_has_content(const unsigned char *b, size_t n){
     size_t k;
@@ -6428,8 +6438,8 @@ present:
     g_uk_present_calls++;
     if (g_uk_present_calls <= 5ul || g_uk_present_calls % 300ul == 0ul) {
         for (k = 0; k < total; k++) if (g_uk_buf[k]) nz++;
-        uk_log("[BENDER_UK_PRESENT] frame=%lu readback=%dx%d fbo=%u bytes_zero=%zu/%zu\n",
-               g_uk_present_calls, w, h, g_uk_src_fbo, total - nz, total);
+        uk_log("[BENDER_UK_PRESENT] frame=%lu readback=%dx%d fbo=%u bytes_zero=%zu/%zu cksum=%08x\n",
+               g_uk_present_calls, w, h, g_uk_src_fbo, total - nz, total, uk_cksum(g_uk_buf, total));
     }
 }
 
