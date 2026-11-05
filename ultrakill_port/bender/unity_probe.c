@@ -5997,6 +5997,7 @@ static UkReadPixelsFn g_uk_read;
 static unsigned long g_uk_present_calls;
 static int            g_uk_off;
 static int            g_uk_vp_tmp[4];
+static int            g_uk_last_w, g_uk_last_h;   /* fix -Z: o que uk_present escolheu */
 
 static void uk_log(const char *fmt, ...) {
     char line[512];
@@ -6187,6 +6188,7 @@ static int      g_uk_ctx_announced;
 #define UK_GL_READ_BUFFER         0x0C0Cu
 #define UK_GL_COLOR_BUFFER_BIT   0x00004000u
 #define UK_GL_NEAREST            0x2600u
+#define UK_GL_LINEAR             0x2601u
 typedef void (*UkBlitFramebufferFn)(int,int,int,int,int,int,int,int,unsigned,unsigned,int);
 static UkBlitFramebufferFn g_uk_blit_fb;
 static unsigned long g_uk_blit_calls;
@@ -6433,6 +6435,7 @@ static void uk_present(int w, int h) {
 
 present:
     if (g_uk_bind_fbo) g_uk_bind_fbo(UK_GL_READ_FRAMEBUFFER, (unsigned)saved);
+    g_uk_last_w = w; g_uk_last_h = h;   /* fix -Z: tamanho do conteudo escolhido */
     /* fix -S: escreve na pagina do fundo e depois vira o CRTC para ela. */
     if (g_uk_double && g_uk_page_bytes) g_uk_page ^= 1u;
     uk_fb_blit(g_uk_buf, w, h);
@@ -6460,9 +6463,9 @@ present:
  *  - rc=0 com EGL_BAD_*    -> nao ha surface real nenhuma: o renderer do Unity
  *    nunca obteve uma janela valida (ANativeWindow fake) e nao produz quadros.
  * Loga os 8 primeiros e a cada 300. BENDER_UK_HOST_SWAP=0 desliga. */
-static void uk_host_egl_swap_probe(void){
+static int uk_host_egl_swap_probe(void){
     const char *off = getenv("BENDER_UK_HOST_SWAP");
-    if(off && (!strcmp(off,"0") || !strcmp(off,"off"))) return;
+    if(off && (!strcmp(off,"0") || !strcmp(off,"off"))) return 0;
     typedef void*(*GetD)(void);
     typedef void*(*GetS)(int);
     typedef int(*SwapFn)(void*,void*);
@@ -6473,7 +6476,7 @@ static void uk_host_egl_swap_probe(void){
     ErrFn  ge = (ErrFn)bender_host_egl_sym("eglGetError");
     static unsigned long n;
     static int announced;
-    if(!gd||!gs||!sb){ if(!announced){announced=1; logmsg("[BENDER_UK_HOST_SWAP][SKIP] símbolos EGL do host indisponíveis\n");} return; }
+    if(!gd||!gs||!sb){ if(!announced){announced=1; logmsg("[BENDER_UK_HOST_SWAP][SKIP] símbolos EGL do host indisponíveis\n");} return 0; }
     void *d = gd();
     void *sd = gs(0x3059 /*EGL_DRAW*/);
     void *sr = gs(0x305A /*EGL_READ*/);
@@ -6483,6 +6486,48 @@ static void uk_host_egl_swap_probe(void){
     ++n;
     if(n<=8ul||n%300ul==0ul)
         logmsg("[BENDER_UK_HOST_SWAP] n=%lu display=%p surface=%p rc=%d eglGetError=%d\n",n,d,sd,rc,err);
+    return rc==1?1:0;
+}
+
+/* ULTRAKILL fix -Z: o conteudo REAL esta no FBO do Unity (log 05/11 09:53:
+ * "fbo-completos=2 bind-atual=20 ... escolhidos core=676/1000 640x480"), mas
+ * /dev/fb0 nao chega ao LCD neste firmware - por isso o blit de CPU nunca apareceu.
+ * O que falta e exatamente o que o Unity deveria fazer no present dele:
+ *   1) glBlitFramebuffer( RT_do_Unity -> backbuffer da janela ), escalando;
+ *   2) eglSwapBuffers REAIS (uk_host_egl_swap_probe: rc=1 EGL_TRUE, sem erro).
+ * Tudo na thread do proprio Unity, SEM SDL_GL_MakeCurrent (nao disputar contexto).
+ * BENDER_UK_WINDOW_SWAP=0 desliga. */
+static int uk_guest_present_via_window(void){
+    const char *off = getenv("BENDER_UK_WINDOW_SWAP");
+    if (off && (!strcmp(off,"0") || !strcmp(off,"off"))) return 0;
+    if (!g_uk_src_fbo) return 0;                 /* so faz sentido com um RT escolhido */
+    uk_gl_syms();
+    if (!g_uk_bind_fbo) return 0;
+    if (!g_uk_blit_fb) g_uk_blit_fb = (UkBlitFramebufferFn)uk_gl_addr("glBlitFramebuffer");
+    if (!g_uk_blit_fb) {
+        static int announced;
+        if (!announced) { announced = 1; logmsg("[BENDER_UK_WINDOW_SWAP][SKIP] glBlitFramebuffer indisponivel no driver\n"); }
+        return 0;
+    }
+    int sw = g_uk_last_w > 0 ? g_uk_last_w : 640;
+    int sh = g_uk_last_h > 0 ? g_uk_last_h : 480;
+    int dw = g_bender_sdl_draw_w > 0 ? g_bender_sdl_draw_w : 1280;
+    int dh = g_bender_sdl_draw_h > 0 ? g_bender_sdl_draw_h : 720;
+    int prev_draw = 0, prev_read = 0;
+    if (g_uk_get_integerv) {
+        g_uk_get_integerv(UK_GL_FRAMEBUFFER_BINDING, &prev_draw);
+        g_uk_get_integerv(UK_GL_READ_FRAMEBUFFER_BINDING, &prev_read);
+    }
+    g_uk_bind_fbo(UK_GL_DRAW_FRAMEBUFFER, 0u);            /* backbuffer da janela */
+    g_uk_bind_fbo(UK_GL_READ_FRAMEBUFFER, g_uk_src_fbo);  /* RT do Unity */
+    g_uk_blit_fb(0, 0, sw, sh, 0, 0, dw, dh, UK_GL_COLOR_BUFFER_BIT, UK_GL_LINEAR, 0);
+    g_uk_bind_fbo(UK_GL_DRAW_FRAMEBUFFER, (unsigned)prev_draw);
+    g_uk_bind_fbo(UK_GL_READ_FRAMEBUFFER, (unsigned)prev_read);
+    int did = uk_host_egl_swap_probe();
+    static unsigned long n;
+    if (++n <= 5ul || n % 300ul == 0ul)
+        logmsg("[BENDER_UK_WINDOW_SWAP] n=%lu RT=fbo%u %dx%d -> janela %dx%d swap=%d\n", n, g_uk_src_fbo, sw, sh, dw, dh, did);
+    return did;
 }
 
 /* ULTRAKILL fix -R: apresentacao na thread do proprio Unity. Chamado por
@@ -6503,7 +6548,9 @@ static void uk_flush_present_throttled(void){
     if(g_uk_flush_last_ms&&(now-g_uk_flush_last_ms)<28LL)return;
     g_uk_flush_last_ms=now;
     uk_fb_present_frame(0,0);
-    uk_host_egl_swap_probe();
+    /* fix -Z: a rota que deve chegar ao LCD (copia RT->janela + swap real do
+     * driver). Se ainda nao houver RT escolhido, tenta so o swap puro. */
+    if(!uk_guest_present_via_window()) uk_host_egl_swap_probe();
     unsigned long n=__atomic_add_fetch(&g_uk_flush_present_calls,1ul,__ATOMIC_RELAXED);
     if(n<=3ul||n%300ul==0ul)logmsg("[BENDER_UK_FLUSH_PRESENT] n=%lu apresentando na thread do Unity (contexto corrente)\n",n);
 }
