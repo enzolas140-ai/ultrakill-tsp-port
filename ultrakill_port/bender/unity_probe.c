@@ -6034,6 +6034,9 @@ static void uk_test_pattern(unsigned char *base, unsigned w, unsigned h, unsigne
  * enquanto a captura mostra os fragmentos. Estas variaveis resolvem os dois. */
 static struct fb_var_screeninfo g_uk_var;
 static size_t g_uk_page_bytes;
+static size_t g_uk_scan_bytes;   /* fix -AB: bytes ate a pagina realmente em scanout */
+static unsigned g_uk_scan_lines;
+static unsigned g_uk_flip;        /* 0 = sem page flip (escreve sempre na pagina vista) */
 static unsigned g_uk_page, g_uk_double, g_uk_cap_w, g_uk_cap_h;
 
 static int uk_fb_init(int src_w, int src_h) {
@@ -6066,6 +6069,17 @@ static int uk_fb_init(int src_w, int src_h) {
     g_uk_var = var;
     g_uk_page_bytes = (size_t)finfo.line_length * (size_t)var.yres;
     g_uk_double = (var.yres_virtual >= 2u * var.yres) ? 1u : 0u;
+    /* fix -AB: o flip de pagina do fix -S era uma CONJECTURA minha. Se o driver
+     * ignora FBIOPAN_DISPLAY (bem provavel no sunxi com CRTC sob DRM/KMS), metade
+     * dos nossos frames ia para uma pagina que ninguem varre. O certo e escrever na
+     * pagina que o driver esta MESMO a mostrar: var.yoffset no arranque. Flip so com
+     * BENDER_UK_FB_FLIP=1. */
+    g_uk_scan_lines = (unsigned)var.yoffset;
+    g_uk_scan_bytes = (size_t)var.yoffset * (size_t)finfo.line_length;
+    if (g_uk_scan_bytes >= (size_t)g_uk_fblen) { g_uk_scan_lines = 0; g_uk_scan_bytes = 0; }
+    g_uk_page = 0u;
+    g_uk_flip = 0u;
+    { const char *fl = getenv("BENDER_UK_FB_FLIP"); if (fl && !strcmp(fl, "1")) g_uk_flip = g_uk_double; }
     /* capacity: o maior entre o painel e o pedido, com teto obvio em 1280x720 para
      * nao estourar no readback (o buffer e alocado por isto). */
     g_uk_cap_w = var.xres > 1280u ? var.xres : 1280u;
@@ -6096,11 +6110,12 @@ static int uk_fb_init(int src_w, int src_h) {
             uk_log("[BENDER_UK_PRESENT] fb duplo: FBIOPAN falhou (%s); escrevemos na pagina 0\n", strerror(errno));
         }
     }
-    uk_log("[BENDER_UK_PRESENT] painel=%ux%u virtual=%u pitch=%u bpp=%u duplo=%u buffer=%ux%u\n",
-           g_uk_w, g_uk_h, g_uk_var.yres_virtual, g_uk_pitch, g_uk_bpp, g_uk_double, g_uk_cap_w, g_uk_cap_h);
+    uk_log("[BENDER_UK_PRESENT] painel=%ux%u virtual=%u pitch=%u bpp=%u duplo=%u flip=%u yoffset_inicial=%u buffer=%ux%u\n",
+           g_uk_w, g_uk_h, g_uk_var.yres_virtual, g_uk_pitch, g_uk_bpp, g_uk_double, g_uk_flip, g_uk_scan_lines, g_uk_cap_w, g_uk_cap_h);
     uk_log("[BENDER_UK_PRESENT] backend=fb0 %ux%u bpp=%u pitch=%u (source %dx%d) - CRTC intacto\n",
            g_uk_w, g_uk_h, g_uk_bpp, g_uk_pitch, src_w, src_h);
-    uk_test_pattern((unsigned char *)g_uk_fbmap, g_uk_w, g_uk_h, g_uk_pitch);
+    uk_test_pattern((unsigned char *)g_uk_fbmap + (g_uk_scan_bytes < (size_t)g_uk_fblen ? g_uk_scan_bytes : 0),
+                    g_uk_w, g_uk_h, g_uk_pitch);
     uk_log("[BENDER_UK_PRESENT] padrao de teste pintado (tarja branca + degrade RGB). Se aparecer, o video esta vivo.\n");
     return 0;
 }
@@ -6120,9 +6135,11 @@ static void *uk_gl_addr(const char *name) {
 static void uk_fb_blit(const unsigned char *rgba, int sw, int sh) {
     unsigned char *base = (unsigned char *)g_uk_fbmap;
     unsigned y, x;
-    /* fix -S: escreve na pagina de tras (g_uk_page ja aponta para ela) - senao, com
-     * fb de duas paginas, pintamos uma pagina que o CRTC nao esta a mostrar. */
-    if (g_uk_double && g_uk_page_bytes && g_uk_page)
+    /* fix -AB: escreve na pagina que o driver esta a varrer (yoffset lido no init).
+     * So alterna paginas se BENDER_UK_FB_FLIP=1 mesmo assim. */
+    if (g_uk_scan_bytes)
+        base += g_uk_scan_bytes;
+    if (g_uk_flip && g_uk_page)
         base += g_uk_page_bytes;
     for (y = 0; y < g_uk_h; y++) {
         unsigned sy = (unsigned)((unsigned long long)y * (unsigned long long)sh / (g_uk_h ? g_uk_h : 1));
@@ -6457,10 +6474,11 @@ static void uk_present(int w, int h) {
 present:
     if (g_uk_bind_fbo) g_uk_bind_fbo(UK_GL_READ_FRAMEBUFFER, (unsigned)saved);
     g_uk_last_w = w; g_uk_last_h = h;   /* fix -Z: tamanho do conteudo escolhido */
-    /* fix -S: escreve na pagina do fundo e depois vira o CRTC para ela. */
-    if (g_uk_double && g_uk_page_bytes) g_uk_page ^= 1u;
+    /* fix -S/-AB: flip so quando explicitamente ligado; por fora disso escrevemos
+     * sempre na pagina em scanout e nao fazemos pan nenhum. */
+    if (g_uk_flip && g_uk_page_bytes) g_uk_page ^= 1u;
     uk_fb_blit(g_uk_buf, w, h);
-    if (g_uk_double && g_uk_page_bytes) {
+    if (g_uk_flip && g_uk_page_bytes) {
         g_uk_var.yoffset = (unsigned)(g_uk_page * (g_uk_page_bytes / (g_uk_pitch ? g_uk_pitch : 1u)));
         if (ioctl(g_uk_fbfd, FBIOPAN_DISPLAY, &g_uk_var) != 0) {
             static int pan_warned;

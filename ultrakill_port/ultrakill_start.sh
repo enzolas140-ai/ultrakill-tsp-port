@@ -335,6 +335,54 @@ if [ "$SPRUCE" = 1 ]; then
     fi
   }
   trap uk_cleanup EXIT TERM INT HUP
+  # ---- mapa de display (uk_display_map) -------------------------------------
+  # O present esta provado a funcionar (RT do Unity com imagem, blit para a janela
+  # e eglSwapBuffers = EGL_TRUE) e o painel continua preto. Entao a pergunta deixa
+  # de ser 'quem presenta' e passa a ser 'onde esta o painel': que framebuffers
+  # existem, o que o DRM mostra, e quem esta vivo. Isto e um retrato do SO no boot,
+  # so leitura, sem efeitos colaterais.
+  uk_display_map() {
+      {
+          echo "===== MAPA DE DISPLAY ====="
+          echo "  uname: $(uname -a 2>/dev/null)"
+          echo "  quem: $(id -un 2>/dev/null) uid=$(id -u 2>/dev/null)"
+          echo "  -- /proc/fb (framebuffers registados) --"
+          sed 's/^/    /' /proc/fb 2>/dev/null || echo '    (sem /proc/fb)'
+          echo "  -- /dev/fb* /dev/dri/* --"
+          ls -l /dev/fb* /dev/dri 2>/dev/null | sed 's/^/    /' || echo '    (nenhum)'
+          echo "  -- /sys/class/graphics/* --"
+          for g in /sys/class/graphics/*; do
+              [ -d "$g" ] || continue
+              echo "    ${g##*/}: name=$(cat "$g/name" 2>/dev/null) modes=$(cat "$g/modes" 2>/dev/null)"
+              echo "      vres=$(cat "$g/virtual/resolution" 2>/dev/null) bs=$(cat "$g/bits_per_pixel" 2>/dev/null) blank=$(cat "$g/blank" 2>/dev/null)"
+          done
+          echo "  -- /sys/class/drm/* --"
+          for c in /sys/class/drm/*; do
+              [ -d "$c" ] || continue
+              n=${c##*/}
+              case "$n" in card*|*-*) ;; *) continue ;; esac
+              echo "    $n status=$(cat "$c/status" 2>/dev/null) enabled=$(cat "$c/enabled" 2>/dev/null) dpms=$(cat "$c/dpms" 2>/dev/null) modes=$(cat "$c/modes" 2>/dev/null)"
+          done
+          echo "  -- consola/VT --"
+          echo "    CUR_TTY=${CUR_TTY:-} tty=$(tty 2>/dev/null)"
+          for v in /sys/class/vtconsole/vtcon*; do
+              [ -e "$v/bind" ] || continue
+              echo "    ${v##*/} bind=$(cat "$v/bind" 2>/dev/null) name=$(cat "$v/name" 2>/dev/null)"
+          done
+          echo "  -- processos vivos (compositor?) --"
+          if command -v ps >/dev/null 2>&1; then
+            ps -eo comm 2>/dev/null | sort -u | tr '\n' ' ' | sed 's/^/    /'
+            echo ""
+          else
+            echo "    (sem ps)"
+          fi
+          echo "  -- libEGL/GL que o loader vai usar --"
+          echo "    SDL_VIDEODRIVER=${SDL_VIDEODRIVER:-} REAL_LIBEGL=${ULTRAKILL_REAL_LIBEGL:-}" \
+               "BENDER_SDL_LIBRARY=${BENDER_SDL_LIBRARY:-}"
+          echo "========================="
+      } >> "$LOG" 2>/dev/null
+  }
+  uk_display_map
   # ---- GPU/RAM clocks do spruceOS (devfreq; Cuphead faz o mesmo) ----
   # Guarda o valor ANTES de subir e restaura no fim (arquivo em /tmp, porque
   # /sys nao aceita criar ficheiros). min_freq no teto = sem DVFS no meio da

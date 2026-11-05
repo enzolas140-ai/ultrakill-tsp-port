@@ -814,3 +814,25 @@ O que procurar agora no unity_probe.log:
   [BENDER_UK_PRESENT] painel=1280x720 virtual=... duplo=... buffer=1280x720
   [BENDER_UK_PRESENT] frame=N readback=1280x720 fbo=... bytes_zero=...
   [BENDER_UK_PRESENT] FBIOPAN falhou (...)   <- so se o flip nao for suportado
+
+=======================================================================
+14) O BUG DE MEDICAO que fez meia sessao ser lida errado (fix -AA, build #133)
+=======================================================================
+uk_score() e uk_cksum() do probe amostravam o readback RGBA a cada 51 BYTES. Como
+51 % 4 == 3, a amostra caia quase sempre no canal ALPHA - e alpha vale 255 ate em
+pixel preto. Consequencias, todas observadas:
+ - buffer VAZIO pontuava ~660/1000 e 'vencia' a escolha de fonte
+   (log 05/11 10:02: 'melhores=[0:661 20:569] -> escolhido fbo=0');
+ - como a rota de janela (fix -Z) so roda com um FBO escolhido, ela NUNCA rodava;
+ - todo 'score=41/119/124/687' lido antes disto e sem valor.
+Agora: amostra por PIXEL (stride 64 bytes = 16 pixels) e conta conteudo apenas se
+R|G|B e nao-zero; o cksum ignora alpha; e se houver um FBO com >=80% do score do
+vencedor bruto, ele e PREFERIDO (blitar FB0->FB0 e nao-op).
+
+Como ler os logs antigos a partir daqui:
+  'fbo-completos=N'      -> N FBOs vivos (glCheckFramebufferStatus == COMPLETE)
+  'preferindo o RT do jogo: fbo=K' -> achou o render target e vai presentsar pela janela
+  '[BENDER_UK_WINDOW_SWAP] n=... RT=fboK WxH -> janela 1280x720 swap=1' -> glBlitFramebuffer
+      do RT para o backbuffer da janela + eglSwapBuffers REAL do driver (EGL_TRUE)
+Se mesmo com swap=1 a tela continuar preta, o display nao esta nas maos do SDL/mali
+deste processo (compositor da ES) - ai e posse de display, nao mais present.
