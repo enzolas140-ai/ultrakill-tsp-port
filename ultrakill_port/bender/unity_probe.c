@@ -6718,6 +6718,165 @@ static void uk_flush_present_throttled(void){
 static void bender_uk_glFlush(void){typedef void(*Fn)(void);Fn f=(Fn)bender_gl_real_proc("glFlush");if(f)f();uk_flush_present_throttled();}
 static void bender_uk_glFinish(void){typedef void(*Fn)(void);Fn f=(Fn)bender_gl_real_proc("glFinish");if(f)f();uk_flush_present_throttled();}
 
+/* ULTRAKILL fix -AH: present por DRM/KMS.
+ * Evidencia acumulada: o Unity produce o quadro (RT fbo=20, conteudo real), o blit
+ * para o backbuffer do SDL roda, eglSwapBuffers devolve EGL_TRUE, SDL_GL_SwapWindow
+ * do backend 'mali' e chamado - e o LCD fica preto. O mapa de display do launcher
+ * explicou: so existe /dev/fb0 e o vtcon0 e um '(S) dummy device', enquanto existe
+ * /dev/dri/card0 - o scanout e do DRM e quem o tem e a ES. Entao a unica coisa que
+ * falta e tomar o DRM master e fazer page flip nosso, com o MESO ARGB32 que ja
+ * copiamos para o fb.
+ * Implementacao com ioctls do UAPI do kernel (sem dependencia de libdrm no device).
+ * ULTRAKILL_DRM_PRESENT=0 desliga. Cada passo falha a logar errno, para a proxima
+ * leitura do log dizer ja se o problema e master negado ou outro modo/timing. */
+#include <drm/drm.h>
+#include <drm/drm_mode.h>
+
+static int      g_drm_fd = -1;
+static unsigned g_drm_crtc = 0, g_drm_conn = 0, g_drm_fb = 0, g_drm_pitch = 0;
+static void    *g_drm_map = NULL;
+static size_t   g_drm_size = 0;
+static unsigned g_drm_w = 0, g_drm_h = 0;
+static int      g_drm_off;      /* 1 = nao tentar mais */
+static unsigned long g_drm_flips;
+
+static int uk_drm_init(void) {
+    const char *e = getenv("ULTRAKILL_DRM_PRESENT");
+    struct drm_mode_res res;
+    struct drm_mode_get_connector con;
+    struct drm_mode_get_crtc crtc;
+    struct drm_mode_modeinfo mode;
+    struct drm_mode_create_dumb cd;
+    struct drm_mode_map_dumb md;
+    struct drm_mode_fb_cmd2 fb;
+    unsigned *con_ids = 0, *crtc_ids = 0;
+    struct drm_mode_modeinfo *modes = 0;
+    int i, found = 0;
+
+    g_drm_off = 1;   /* so passa a 0 no fim, se tudo der certo */
+    if (e && (!strcmp(e, "0") || !strcmp(e, "off"))) return -1;
+
+    g_drm_fd = open("/dev/dri/card0", O_RDWR | O_CLOEXEC);
+    if (g_drm_fd < 0) { uk_log("[BENDER_UK_DRM] open /dev/dri/card0: %s\n", strerror(errno)); return -1; }
+    if (ioctl(g_drm_fd, DRM_IOCTL_SET_MASTER, 0) != 0) {
+        uk_log("[BENDER_UK_DRM] SET_MASTER negado (%s): a ES continua dona do scanout e por isso "
+               "fb0/SDL deste processo nunca aparecem no LCD\n", strerror(errno));
+        close(g_drm_fd); g_drm_fd = -1; return -1;
+    }
+    uk_log("[BENDER_UK_DRM] SET_MASTER OK\n");
+
+    memset(&res, 0, sizeof(res));
+    if (ioctl(g_drm_fd, DRM_IOCTL_MODE_GETRESOURCES, &res) != 0 || !res.count_connectors || !res.count_crtcs) {
+        uk_log("[BENDER_UK_DRM] GETRESOURCES: connectors=%u crtcs=%u\n", res.count_connectors, res.count_crtcs);
+        goto fail;
+    }
+    con_ids  = (unsigned *)(uintptr_t)malloc(sizeof(unsigned) * res.count_connectors);
+    crtc_ids = (unsigned *)(uintptr_t)malloc(sizeof(unsigned) * res.count_crtcs);
+    if (!con_ids || !crtc_ids) goto fail;
+    memcpy(con_ids,  (const void *)(uintptr_t)res.connectors_ptr, sizeof(unsigned) * res.count_connectors);
+    memcpy(crtc_ids, (const void *)(uintptr_t)res.crtcs_ptr,       sizeof(unsigned) * res.count_crtcs);
+
+    modes = (struct drm_mode_modeinfo *)(uintptr_t)malloc(sizeof(struct drm_mode_modeinfo) * 8);
+    if (!modes) goto fail;
+    for (i = 0; i < (int)res.count_connectors && !found; i++) {
+        unsigned nmode;
+        memset(&con, 0, sizeof(con));
+        con.connector_id = con_ids[i];
+        if (ioctl(g_drm_fd, DRM_IOCTL_MODE_GETCONNECTOR, &con) != 0) continue;
+        if (con.connection != 1 || con.count_modes == 0) continue;   /* 1 = connected */
+        nmode = con.count_modes > 8u ? 8u : con.count_modes;
+        memset(&con, 0, sizeof(con));
+        con.connector_id = con_ids[i];
+        con.modes_ptr = (uint64_t)(uintptr_t)modes;
+        con.count_modes = nmode;
+        if (ioctl(g_drm_fd, DRM_IOCTL_MODE_GETCONNECTOR, &con) != 0 || con.count_modes == 0) continue;
+        g_drm_conn = con_ids[i];
+        mode = modes[0];
+        for (i = 0; i < (int)con.count_modes; i++)
+            if (modes[i].type & 0x01) { mode = modes[i]; break; }   /* PREFERRED */
+        found = 1;
+    }
+    if (!found) { uk_log("[BENDER_UK_DRM] nenhum conector com modo\n"); goto fail; }
+    g_drm_w = mode.hdisplay; g_drm_h = mode.vdisplay;
+    if (!g_drm_w || !g_drm_h) goto fail;
+
+    memset(&cd, 0, sizeof(cd));
+    cd.width = g_drm_w; cd.height = g_drm_h; cd.bpp = 32; cd.depth = 24;
+    if (ioctl(g_drm_fd, DRM_IOCTL_MODE_CREATE_DUMB, &cd) != 0) { uk_log("[BENDER_UK_DRM] CREATE_DUMB: %s\n", strerror(errno)); goto fail; }
+    g_drm_pitch = cd.pitch; g_drm_size = (size_t)cd.size;
+    memset(&md, 0, sizeof(md)); md.handle = cd.handle;
+    if (ioctl(g_drm_fd, DRM_IOCTL_MODE_MAP_DUMB, &md) != 0) { uk_log("[BENDER_UK_DRM] MAP_DUMB: %s\n", strerror(errno)); goto fail; }
+    g_drm_map = mmap(0, g_drm_size, PROT_READ | PROT_WRITE, MAP_SHARED, g_drm_fd, md.offset);
+    if (g_drm_map == MAP_FAILED) { g_drm_map = NULL; uk_log("[BENDER_UK_DRM] mmap: %s\n", strerror(errno)); goto fail; }
+    memset(&fb, 0, sizeof(fb));
+    fb.width = g_drm_w; fb.height = g_drm_h;
+    fb.pixel_format = 0x34324241u;   /* DRM_FORMAT_ARGB8888 */
+    fb.pitches[0] = g_drm_pitch; fb.handles[0] = cd.handle;
+    if (ioctl(g_drm_fd, DRM_IOCTL_MODE_ADDFB2, &fb) != 0) { uk_log("[BENDER_UK_DRM] ADDFB2: %s\n", strerror(errno)); goto fail; }
+    g_drm_fb = fb.fb_id;
+
+    /* NAO fazemos SETCRTC: reusamos o CRTC ja ativo que a ES deixou montado, e só
+     * pedimos page flips. Escolhemos o CRTC cujo page flip e aceite. */
+    for (i = 0; i < (int)res.count_crtcs; i++) {
+        struct drm_mode_crtc_page_flip pf;
+        memset(&crtc, 0, sizeof(crtc));
+        crtc.crtc_id = crtc_ids[i];
+        /* struct drm_mode_get_crtc NAO tem fb_id; o que interessa e estar ativo. */
+        if (ioctl(g_drm_fd, DRM_IOCTL_MODE_GETCRTC, &crtc) != 0 || !crtc.active) continue;
+        memset(&pf, 0, sizeof(pf));
+        pf.crtc_id = crtc.crtc_id; pf.fb_id = g_drm_fb;
+        if (ioctl(g_drm_fd, DRM_IOCTL_MODE_PAGE_FLIP, &pf) == 0) {
+            g_drm_crtc = crtc.crtc_id;
+            uk_log("[BENDER_UK_DRM] crtc=%u aceitou page flip (modo=%ux%u, nosso fb=%u)\n",
+                   g_drm_crtc, g_drm_w, g_drm_h, g_drm_fb);
+            break;
+        }
+        uk_log("[BENDER_UK_DRM] crtc=%u recusou page flip: %s\n", crtc.crtc_id, strerror(errno));
+    }
+    if (!g_drm_crtc) { uk_log("[BENDER_UK_DRM] nenhum CRTC aceitou o nosso fb\n"); goto fail; }
+
+    g_drm_off = 0;
+    uk_log("[BENDER_UK_DRM] pronto: %ux%u pitch=%u size=%zu\n", g_drm_w, g_drm_h, g_drm_pitch, g_drm_size);
+    free(modes); free(con_ids); free(crtc_ids);
+    return 0;
+fail:
+    free(modes); free(con_ids); free(crtc_ids);
+    if (g_drm_map && g_drm_map != MAP_FAILED) { munmap(g_drm_map, g_drm_size); g_drm_map = NULL; }
+    g_drm_off = 1;
+    return -1;
+}
+
+/* Copia o ARGB32 ja lido do RT para o buffer escaneado pelo DRM e faz page flip. */
+static void uk_drm_present(const unsigned char *argb, int w, int h) {
+    unsigned y;
+    struct drm_mode_crtc_page_flip pf;
+    if (g_drm_off || g_drm_fd < 0 || !g_drm_map || !argb || w <= 0 || h <= 0 || !g_drm_fb) return;
+    for (y = 0; y < g_drm_h; y++) {
+        unsigned sy = (unsigned)((unsigned long long)y * (unsigned long long)h / g_drm_h);
+        unsigned xx;
+        if (sy >= (unsigned)h) sy = (unsigned)h - 1u;
+        if (g_uk_fy) sy = (unsigned)h - 1u - sy;      /* mesma viragem do fb (so Y) */
+        for (xx = 0; xx < g_drm_w; xx++) {
+            unsigned sx = (unsigned)((unsigned long long)xx * (unsigned long long)w / g_drm_w);
+            const unsigned char *p;
+            if (sx >= (unsigned)w) sx = (unsigned)w - 1u;
+            if (g_uk_fx) sx = (unsigned)w - 1u - sx;
+            p = argb + (size_t)sy * (size_t)w * 4u + (size_t)sx * 4u;
+            ((unsigned *)((char *)g_drm_map + (size_t)y * g_drm_pitch))[xx] =
+                0xff000000u | ((unsigned)p[0] << 16) | ((unsigned)p[1] << 8) | (unsigned)p[2];
+        }
+    }
+    memset(&pf, 0, sizeof(pf));
+    pf.crtc_id = g_drm_crtc; pf.fb_id = g_drm_fb;
+    if (ioctl(g_drm_fd, DRM_IOCTL_MODE_PAGE_FLIP, &pf) != 0) {
+        static int warned;
+        if (!warned) { warned = 1; uk_log("[BENDER_UK_DRM] PAGE_FLIP: %s\n", strerror(errno)); g_drm_off = 1; }
+        return;
+    }
+    if (++g_drm_flips <= 3ul || g_drm_flips % 300ul == 0ul)
+        uk_log("[BENDER_UK_DRM] flip #%lu %ux%u (fonte %dx%d)\n", g_drm_flips, g_drm_w, g_drm_h, w, h);
+}
+
 /* ULTRAKILL fix -N: present por framebuffer para o caminho COM SDL.
  * O blit para /dev/fb0 ja existia, mas so era chamado dentro de
  * bender_eglSwapBuffers no ramo !g_bender_sdl_ready - e no TrimUI Smart Pro o
@@ -6759,8 +6918,8 @@ static void uk_fb_present_frame(int w,int h){
     static int inited=0;
     if(!inited){ uk_present_init(W,H); inited=1; }
     uk_present(W,H);
-    /* fix -P: alem do /dev/fb0, tenta o caminho do SDL (blit FBO->FB0+swap).
-     * Se o painel for varrido pelo SDL/mali (como no Cuphead), e aqui que aparece. */
+    if (!g_drm_off && g_drm_fd < 0) uk_drm_init();
+    if (g_uk_src_fbo && g_uk_buf) uk_drm_present(g_uk_buf, W, H);   /* fix -AH */
     uk_sdl_blit_present(W,H);
 }
 
