@@ -6433,6 +6433,39 @@ present:
     }
 }
 
+/* ULTRAKILL fix -W: teste final da hipotese 'renderiza mas ninguem presenta'.
+ * Usa as SIMBOLICIAS REAIS do driver (nao os cookies do probe) para perguntar ao
+ * proprio EGL qual display/surface estao correntes naquela thread e fazer o swap
+ * no lugar do Unity. Resultado possivel:
+ *  - rc=1 e o painel muda  -> era so falta de present (vira comportamento padrao)
+ *  - rc=0 com EGL_BAD_*    -> nao ha surface real nenhuma: o renderer do Unity
+ *    nunca obteve uma janela valida (ANativeWindow fake) e nao produz quadros.
+ * Loga os 8 primeiros e a cada 300. BENDER_UK_HOST_SWAP=0 desliga. */
+static void uk_host_egl_swap_probe(void){
+    const char *off = getenv("BENDER_UK_HOST_SWAP");
+    if(off && (!strcmp(off,"0") || !strcmp(off,"off"))) return;
+    typedef void*(*GetD)(void);
+    typedef void*(*GetS)(int);
+    typedef int(*SwapFn)(void*,void*);
+    typedef int(*ErrFn)(void);
+    GetD gd = (GetD)bender_host_egl_sym("eglGetCurrentDisplay");
+    GetS gs = (GetS)bender_host_egl_sym("eglGetCurrentSurface");
+    SwapFn sb = (SwapFn)bender_host_egl_sym("eglSwapBuffers");
+    ErrFn  ge = (ErrFn)bender_host_egl_sym("eglGetError");
+    static unsigned long n;
+    static int announced;
+    if(!gd||!gs||!sb){ if(!announced){announced=1; logmsg("[BENDER_UK_HOST_SWAP][SKIP] símbolos EGL do host indisponíveis\n");} return; }
+    void *d = gd();
+    void *sd = gs(0x3059 /*EGL_DRAW*/);
+    void *sr = gs(0x305A /*EGL_READ*/);
+    if(!sd) sd = sr;
+    int rc = (d && sd) ? sb(d, sd) : -1;
+    int err = ge ? ge() : -1;
+    ++n;
+    if(n<=8ul||n%300ul==0ul)
+        logmsg("[BENDER_UK_HOST_SWAP] n=%lu display=%p surface=%p rc=%d eglGetError=%d\n",n,d,sd,rc,err);
+}
+
 /* ULTRAKILL fix -R: apresentacao na thread do proprio Unity. Chamado por
  * glFlush/glFinish e pelo bind do FB0 - os tres unicos momentos em que o contexto
  * do Unity esta corrente e a gente pode ler o quadro dele. Taxa limitada a ~35/s
@@ -6451,6 +6484,7 @@ static void uk_flush_present_throttled(void){
     if(g_uk_flush_last_ms&&(now-g_uk_flush_last_ms)<28LL)return;
     g_uk_flush_last_ms=now;
     uk_fb_present_frame(0,0);
+    uk_host_egl_swap_probe();
     unsigned long n=__atomic_add_fetch(&g_uk_flush_present_calls,1ul,__ATOMIC_RELAXED);
     if(n<=3ul||n%300ul==0ul)logmsg("[BENDER_UK_FLUSH_PRESENT] n=%lu apresentando na thread do Unity (contexto corrente)\n",n);
 }
