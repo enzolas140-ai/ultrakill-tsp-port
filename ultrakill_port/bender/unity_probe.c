@@ -6302,7 +6302,13 @@ static void uk_fb_present_frame(int w,int h){
 }
 
 static BenderEGLBoolean bender_eglSwapBuffers(BenderEGLDisplay d,BenderEGLSurface s){
-    if(d==BENDER_EGL_DISPLAY_COOKIE&&s==BENDER_EGL_SURFACE_COOKIE&&g_bender_sdl_ready){unsigned long next_swap=g_bender_egl_swaps+1ul;bender_render_inspector_before_swap(next_swap);bender_render_scale_present_2768();bender_input_draw_cursor();bender_gpu_watchdog_done("eglSwapBuffers-sdl");g_sdl_GL_SwapWindow(g_bender_sdl_window);++g_bender_egl_swaps;bender_render_scale_resume_2768();if(g_bender_egl_swaps<=10||g_bender_egl_swaps%60u==0u)logmsg("[BENDER_EGL][SWAP][SDL] frame=%lu drawable=%dx%d render_scale=%s\n",g_bender_egl_swaps,g_bender_sdl_draw_w,g_bender_sdl_draw_h,g_bender_rs_active_2768?"75%":"OFF");return BENDER_EGL_TRUE;}
+    if(d==BENDER_EGL_DISPLAY_COOKIE&&s==BENDER_EGL_SURFACE_COOKIE&&g_bender_sdl_ready){unsigned long next_swap=g_bender_egl_swaps+1ul;bender_render_inspector_before_swap(next_swap);bender_render_scale_present_2768();bender_input_draw_cursor();bender_gpu_watchdog_done("eglSwapBuffers-sdl");g_sdl_GL_SwapWindow(g_bender_sdl_window);++g_bender_egl_swaps;
+        /* ULTRAKILL fix -Q (log de 05/11 07:56): este e o unico sitio onde o contexto
+         * GL esta de facto corrente (a thread do frame loop nao tem: SDL_GL_MakeCurrent
+         * rc=-1 'Unable to make EGL context current'), portanto so aqui o readback do
+         * FBO do Unity pode apanhar imagem. BENDER_UK_SWAP_THREAD=0 desliga. */
+        {const char *st=getenv("BENDER_UK_SWAP_THREAD");if(!(st&&!strcmp(st,"0")))uk_fb_present_frame(0,0);}
+        bender_render_scale_resume_2768();if(g_bender_egl_swaps<=10||g_bender_egl_swaps%60u==0u)logmsg("[BENDER_EGL][SWAP][SDL] frame=%lu drawable=%dx%d render_scale=%s\n",g_bender_egl_swaps,g_bender_sdl_draw_w,g_bender_sdl_draw_h,g_bender_rs_active_2768?"75%":"OFF");return BENDER_EGL_TRUE;}
     typedef BenderEGLBoolean(*Fn)(BenderEGLDisplay,BenderEGLSurface);Fn f=(Fn)bender_host_egl_sym("eglSwapBuffers");
     {
         /* ULTRAKILL: sem SDL nao ha quem leve o quadro a tela; blitamos
@@ -6313,10 +6319,7 @@ static BenderEGLBoolean bender_eglSwapBuffers(BenderEGLDisplay d,BenderEGLSurfac
             if(!(off&&!strcmp(off,"0"))){
                 int W=g_native_window.width>0?g_native_window.width:640;
                 int H=g_native_window.height>0?g_native_window.height:480;
-                if(g_uk_present_calls==0ul&&!g_uk_off)uk_present_init(W,H);
-                uk_present(W,H);
-                /* nota: uk_fb_present_frame e o caminho idempotente (congela o
-                 * tamanho no 1o init); usado no frame loop com SDL. */
+                uk_fb_present_frame(W,H);
             }
         }
         return rrc;
@@ -10765,6 +10768,20 @@ static void *bender_guest_dlsym(void *handle,const char *symbol) {
     if(symbol&&!strncmp(symbol,"egl",3)){uintptr_t bp=bridge_symbol(symbol);if(bp){p=(void*)bp;src="BENDER_EGL_BRIDGE";}}
     if(!p&&symbol&&!strncmp(symbol,"gl",2)){p=bender_gles_proc_bridge(symbol);if(p)src="BENDER_GLES_BRIDGE";}
     if(!p&&symbol) p=dlsym(handle?handle:RTLD_DEFAULT,symbol);
+    /* ULTRAKILL fix -Q (a causa de guest_swaps=0 para sempre no log de 05/11 07:56):
+     * o Unity resolve as entradas dele por dlsym. Se receber o eglSwapBuffers DO HOST,
+     * o present escapa do probe inteiro (e nem o blit fb0 nem o swap SDL sao chamados
+     * na thread com contexto). Devolvemos os nossos wrappers da familia de swap, para
+     * o cair no sitio certo. BENDER_UK_SWAP_BRIDGE=0 desliga. */
+    if(symbol&&(!strncmp(symbol,"eglSwapBuffers",14))){
+        const char *sw=getenv("BENDER_UK_SWAP_BRIDGE");
+        if(!(sw&&!strcmp(sw,"0"))&&!p) p=bridge_symbol("eglSwapBuffers");
+        if(!(sw&&!strcmp(sw,"0"))&&p){
+            g_guest_dlerror[0]=0;
+            logmsg("[BENDER_UK_SWAP_BRIDGE][DLSYM] symbol=%s -> wrapper proprio=%p (present na thread do Unity)\n",symbol,p);
+            return p;
+        }
+    }
     if(!p&&symbol){uintptr_t bp=bridge_symbol(symbol);if(bp){p=(void*)bp;src="BENDER_BRIDGE_FALLBACK";}}
     if(!p&&symbol){p=dlsym(RTLD_DEFAULT,symbol);if(p)src="HOST_DEFAULT_FALLBACK";}
     logmsg("[BENDER_DL] dlsym host handle=%p symbol=%s source=%s -> %p\n",handle,symbol?symbol:"",src,p);

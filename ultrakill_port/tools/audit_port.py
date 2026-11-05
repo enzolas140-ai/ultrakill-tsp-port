@@ -158,7 +158,12 @@ def check_set_u(root, port_parent, rep):
         if 'set -u' not in src:
             rep.add('WARN', '%s: sem set -u' % name, 'nada a checar')
             continue
+        # comentarios NAO sao codigo: sem isto, uma linha tipo
+        # '#   echo 0 | $SUDO tee ...' (citacao de outro port) vira 'VAR sem
+        # default' falso-positiva e o auditor perde credibilidade.
+        src_code = '\n'.join(l for l in src.splitlines() if not l.lstrip().startswith('#'))
         assigned = set()
+        src = src_code
         # atribuicao pode vir depois de ';', '&&', '||', '|', '(' e num for/read;
         # sem isso TODO var de 'case' vira falso positivo.
         for chunk in re.split(r'[;|&\n)]|\bthen\b|\bdo\b|\{', src):
@@ -334,8 +339,19 @@ def check_runtime_files(root, rep):
         try:
             d = json.load(open(lp, encoding='utf-8'))
             fl = d.get('frameRateLimit')
-            rep.add('OK' if (fl is None or float(fl) >= 30) else 'WARN',
-                    'frameRateLimit do jogo nao trava em <30', str(fl))
+            # o jogo REESCREVE as prefs ao sair (pegamos frameRateLimit voltando
+            # de 60 para 7), entao o valor em disco nao e a palavra final: o
+            # launcher impoe ULTRAKILL_TARGET_FPS a cada boot.
+            enforced = False
+            lau = os.path.join(root, 'ultrakill_start.sh')
+            if os.path.isfile(lau):
+                s = open(lau, encoding='utf-8', errors='replace').read()
+                enforced = 'frameRateLimit' in s and 'ULTRAKILL_ENFORCE_FPS_PREF' in s
+            ok = (fl is None) or float(fl) >= 30 or enforced
+            note = str(fl)
+            if enforced and fl is not None and float(fl) < 30:
+                note += ' (valor salvo pelo jogo; o launcher impoe o alvo a cada boot)'
+            rep.add('OK' if ok else 'WARN', 'frameRateLimit do jogo nao trava em <30', note)
         except Exception:
             pass
     # 4) pastas de escrita
@@ -414,17 +430,23 @@ def check_es_handoff(root, port_parent, rep):
     if not os.path.isfile(lau):
         rep.add('WARN', 'launcher para checar handoff de ES', 'ausente'); return
     src = open(lau, encoding='utf-8', errors='replace').read()
-    unbind = re.search(r'echo\s+0\s*>\s*/sys/class/vtconsole', src)
+    # unbind pode ser 'echo 0 > arquivo' (direto) ou 'echo 0 | tee arquivo'
+    # (jeito do NFSU2, que funciona sem sudo no spruceOS). Os dois so sao
+    # aceitos se houver um caminho de volta (bind 1) registrado.
+    unbind = re.search(r'echo\s+["\']?0["\']?\s*(>|\|\s*\$?[A-Za-z_]*SUDO?\w*\s+tee)\s*[^\n]*vtconsole', src)
+    rebind = re.search(r'echo\s+["\']?1["\']?\s*(>|\|\s*\$?[A-Za-z_]*SUDO?\w*\s+tee)\s*[^\n]*vtconsole', src)
+    helper = 'uk_vt_set 1' in src
     guarded = 'ULTRAKILL_DISPLAY_TAKEOVER' in src
-    rep.add('OK' if (unbind is None or guarded) else 'FAIL',
-            'unbind de vtcon so acontece protegido por knob',
-            'opt-in via ULTRAKILL_DISPLAY_TAKEOVER' if guarded else
-            'echo 0 > vtcon/bind SEM guarda: deixa a ES congelada ate reboot')
+    rep.add('OK' if (unbind is None or (guarded and (rebind or helper))) else 'FAIL',
+            'unbind de vtcon tem caminho de volta',
+            'opt-in + re-bind (%s)' % ('uk_vt_set 1' if helper else 'echo 1') if (unbind and guarded and (rebind or helper))
+            else ('sem unbind' if not unbind else 'FALTA: religar vtcon na saida congela a ES'))
     # o cleanup tem que devolver o console, nao so o devfreq
     m = re.search(r'uk_cleanup\(\)\s*\{(.{0,4000}?)\n  \}', src, re.S)
     body = m.group(1) if m else ''
-    rep.add('OK' if ('vtconsole' in body and 'echo 1' in body) else 'FAIL',
-            'uk_cleanup restaura o vtcon', 'ok' if 'vtconsole' in body else 'FALTA: restaurar bind=1 na saida')
+    ok_clean = ('vtconsole' in body and ('echo 1' in body or 'echo "1"' in body)) or 'uk_vt_set 1' in body
+    rep.add('OK' if ok_clean else 'FAIL',
+            'uk_cleanup restaura o vtcon', 'ok' if ok_clean else 'FALTA: restaurar bind=1 na saida')
     rep.add('OK' if 'trap uk_cleanup' in src else 'FAIL', 'trap de limpeza registrado', '')
     if os.path.isfile(ent):
         e = open(ent, encoding='utf-8', errors='replace').read()

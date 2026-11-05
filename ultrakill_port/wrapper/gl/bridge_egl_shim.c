@@ -499,6 +499,170 @@ EGLBoolean eglDestroySurface(EGLDisplay dpy, EGLSurface surface) {
   return real_ds(dpy, surface);
 }
 
+/* ==== ULTRAKILL fix -Q: present por framebuffer DENTRO do shim ==========
+ * Motivo (log de 05/11 07:56): o probe conta `guest_swaps=0` para SEMPRE, porque o
+ * libunity.so tem `NEEDED libEGL.so` = este shim; os swaps vao para o driver real e o
+ * probe nunca os ve. E a thread do frame loop do probe NAO tem contexto GL
+ * (SDL_GL_MakeCurrent rc=-1 'Unable to make EGL context current'), entao o readback
+ * la e sempre todo zero. Logo depois do swap real, AQUI, o contexto do Unity esta
+ * corrente nesta thread - e o unico sitio onde a imagem pode ser lida.
+ * Ja esta comprovado neste cartao que escrever em /dev/fb0 APARECE no painel (o padrao
+ * de teste RGB do probe apareceu na tela da ES), entao blit aqui = video.
+ * ULTRAKILL_SHIM_FB=0 desliga (sem recompilar). */
+#include <errno.h>
+#include <fcntl.h>
+#include <unistd.h>
+#include <string.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <sys/ioctl.h>
+#include <sys/mman.h>
+#include <linux/fb.h>
+
+typedef void (*sfb_read_px)(int,int,int,int,unsigned,unsigned,void*);
+typedef void (*sfb_get_iv)(unsigned,int*);
+typedef void (*sfb_bind_fbo)(unsigned,unsigned);
+
+static void *sfb_glsym(const char *name){
+  static void *gh;
+  void *p = dlsym(RTLD_DEFAULT, name);
+  if (p) return p;
+  if (!gh) {
+    const char *gv = getenv("ULTRAKILL_REAL_LIBGLESV2");
+    const char *cand[4];
+    cand[0] = (gv && *gv) ? gv : "libGLESv2.so.2";
+    cand[1] = (gv && *gv) ? gv : "libGLESv2.so";
+    cand[2] = "libGLESv2.so.2";
+    cand[3] = "libGLESv2.so";
+    for (int i = 0; i < 4 && !gh; i++) gh = dlopen(cand[i], RTLD_NOW | RTLD_NOLOAD);
+    for (int i = 0; i < 4 && !gh; i++) gh = dlopen(cand[i], RTLD_NOW);
+  }
+  return gh ? dlsym(gh, name) : NULL;
+}
+
+#define SFB_READ_FRAMEBUFFER       0x8CA8u
+#define SFB_FRAMEBUFFER_BINDING    0x8CA6u
+#define SFB_VIEWPORT               0x0BA2u
+#define SFB_RGBA                   0x1908u
+#define SFB_UNSIGNED_BYTE          0x1401u
+
+static int   sfb_state;              /* 0 nova, 1 pronta, -1 desligada */
+static int   sfb_fd = -1;
+static unsigned char *sfb_map;
+static size_t sfb_len;
+static int   sfb_w, sfb_h, sfb_pitch, sfb_bpp = 32;
+static int   sfb_ro = 16, sfb_go = 8, sfb_bo = 0, sfb_rl = 8, sfb_gl = 8, sfb_bl = 8;
+static unsigned char *sfb_buf;
+static size_t sfb_buf_len;
+static int   sfb_src_w, sfb_src_h;   /* tamanho do ultimo readback util */
+static unsigned long sfb_blits, sfb_empty;
+static int   sfb_fbo_id = -1;        /* FBO descoberto (-1 = tenta padrao) */
+
+static int sfb_setup(void){
+  const char *dev = getenv("ULTRAKILL_FB_DEVICE");
+  struct fb_var_screeninfo v; struct fb_fix_screeninfo f;
+  if (!dev || !*dev) dev = "/dev/fb0";
+  sfb_fd = open(dev, O_RDWR | O_CLOEXEC);
+  if (sfb_fd < 0) { fprintf(stderr, "shim/fb: open %s falhou: %s\n", dev, strerror(errno)); return -1; }
+  if (ioctl(sfb_fd, FBIOGET_VSCREENINFO, &v) || ioctl(sfb_fd, FBIOGET_FSCREENINFO, &f)) {
+    fprintf(stderr, "shim/fb: ioctl VS/FIS falhou: %s\n", strerror(errno)); return -1;
+  }
+  v.bits_per_pixel = 32; v.grayscale = 0;
+  v.red.length = v.green.length = v.blue.length = 8;
+  v.red.offset = 16; v.green.offset = 8; v.blue.offset = 0;
+  v.transp.length = 0; v.transp.offset = 24;
+  if (ioctl(sfb_fd, FBIOPUT_VSCREENINFO, &v) == 0) ioctl(sfb_fd, FBIOGET_VSCREENINFO, &v);
+  sfb_w = (int)v.xres; sfb_h = (int)v.yres; sfb_pitch = (int)f.line_length; sfb_bpp = (int)v.bits_per_pixel;
+  sfb_ro = (int)v.red.offset; sfb_go = (int)v.green.offset; sfb_bo = (int)v.blue.offset;
+  sfb_rl = v.red.length ? (int)v.red.length : 8;
+  sfb_gl = v.green.length ? (int)v.green.length : 8;
+  sfb_bl = v.blue.length ? (int)v.blue.length : 8;
+  size_t need = (size_t)f.line_length * (v.yres_virtual ? (size_t)v.yres_virtual : (size_t)v.yres);
+  sfb_len = (f.smem_len && (size_t)f.smem_len < need) ? (size_t)f.smem_len : need;
+  void *m = mmap(0, sfb_len, PROT_READ | PROT_WRITE, MAP_SHARED, sfb_fd, 0);
+  if (m == MAP_FAILED) { fprintf(stderr, "shim/fb: mmap %zu falhou: %s\n", sfb_len, strerror(errno)); return -1; }
+  sfb_map = (unsigned char *)m;
+  sfb_buf_len = (size_t)1280 * 720 * 4;
+  sfb_buf = (unsigned char *)malloc(sfb_buf_len);
+  if (!sfb_buf) return -1;
+  fprintf(stderr, "shim/fb: %dx%d bpp=%d pitch=%d len=%zu (buffer ate 1280x720)\n",
+          sfb_w, sfb_h, sfb_bpp, sfb_pitch, sfb_len);
+  return 1;
+}
+
+static int sfb_has_content(const unsigned char *b, size_t n){
+  for (size_t k = 0; k < n; k += 997u) if (b[k]) return 1;
+  return 0;
+}
+
+static void sfb_blit(const unsigned char *rgba, int sw, int sh){
+  for (int y = 0; y < sfb_h; y++) {
+    int sy = sh > 0 ? (int)((long long)y * sh / sfb_h) : 0;
+    if (sy >= sh) sy = sh - 1;
+    if (sy < 0) sy = 0;
+    if ((size_t)y * (size_t)sfb_pitch + (size_t)sfb_w * ((size_t)sfb_bpp / 8u) > sfb_len) break;
+    const unsigned char *sr = rgba + (size_t)sy * (size_t)sw * 4u;
+    unsigned char *dr = sfb_map + (size_t)y * (size_t)sfb_pitch;
+    for (int x = 0; x < sfb_w; x++) {
+      int sx = sw > 0 ? (int)((long long)x * sw / sfb_w) : 0;
+      if (sx >= sw) sx = sw - 1;
+      if (sx < 0) sx = 0;
+      const unsigned char *p = sr + (size_t)sx * 4u;
+      if (sfb_bpp == 32) {
+        unsigned r = p[0] >> (8 - sfb_rl), g = p[1] >> (8 - sfb_gl), b = p[2] >> (8 - sfb_bl);
+        ((unsigned *)dr)[x] = (r << sfb_ro) | (g << sfb_go) | (b << sfb_bo);
+      } else {
+        unsigned r = p[0] >> (8 - sfb_rl), g = p[1] >> (8 - sfb_gl), b = p[2] >> (8 - sfb_bl);
+        ((unsigned short *)dr)[x] = (unsigned short)((r << sfb_ro) | (g << sfb_go) | (b << sfb_bo));
+      }
+    }
+  }
+}
+
+static void sfb_present(void){
+  const char *off = getenv("ULTRAKILL_SHIM_FB");
+  if (off && (!strcmp(off, "0") || !strcmp(off, "off"))) return;
+  if (!sfb_state) sfb_state = sfb_setup();
+  if (sfb_state < 0 || !sfb_map || !sfb_buf) return;
+  sfb_read_px rd = (sfb_read_px)sfb_glsym("glReadPixels");
+  sfb_get_iv  gi = (sfb_get_iv)sfb_glsym("glGetIntegerv");
+  sfb_bind_fbo bf = (sfb_bind_fbo)sfb_glsym("glBindFramebuffer");
+  if (!rd) { fprintf(stderr, "shim/fb: glReadPixels ausente; desligando\n"); sfb_state = -1; return; }
+  int vp[4] = { 0, 0, 0, 0 };
+  if (gi) gi(SFB_VIEWPORT, vp);
+  int sw = vp[2] > 0 ? vp[2] : (sfb_src_w > 0 ? sfb_src_w : 640);
+  int sh = vp[3] > 0 ? vp[3] : (sfb_src_h > 0 ? sfb_src_h : 360);
+  if ((size_t)sw * (size_t)sh * 4u > sfb_buf_len) { sw = 640; sh = 360; }
+  if (sw <= 0 || sh <= 0) return;
+  int saved = 0;
+  if (bf && gi) gi(SFB_FRAMEBUFFER_BINDING, &saved);
+  size_t n = (size_t)sw * (size_t)sh * 4u;
+  int ok = 0;
+  /* 1) fonte ja conhecida, ou o framebuffer padrao (pos-swap = o quadro apresentado) */
+  if (bf) bf(SFB_READ_FRAMEBUFFER, sfb_fbo_id > 0 ? (unsigned)sfb_fbo_id : 0u);
+  rd(0, 0, sw, sh, SFB_RGBA, SFB_UNSIGNED_BYTE, sfb_buf);
+  if (sfb_has_content(sfb_buf, n)) ok = 1;
+  /* 2) vazia: varre FBOs (o Unity desenha num render target) */
+  if (!ok && bf) {
+    for (int id = 1; id <= 48 && !ok; id++) {
+      bf(SFB_READ_FRAMEBUFFER, (unsigned)id);
+      rd(0, 0, sw, sh, SFB_RGBA, SFB_UNSIGNED_BYTE, sfb_buf);
+      if (sfb_has_content(sfb_buf, n)) { sfb_fbo_id = id; ok = 1;
+        fprintf(stderr, "shim/fb: fonte encontrada no FBO %d (%dx%d)\n", id, sw, sh); }
+    }
+  }
+  if (bf) bf(SFB_READ_FRAMEBUFFER, (unsigned)saved);
+  if (!ok) {
+    if (++sfb_empty <= 3u || sfb_empty % 300u == 0u)
+      fprintf(stderr, "shim/fb: readback vazio (%dx%d) tentativas=%lu\n", sw, sh, sfb_empty);
+    return;
+  }
+  sfb_src_w = sw; sfb_src_h = sh;
+  sfb_blit(sfb_buf, sw, sh);
+  if (++sfb_blits <= 3ul || sfb_blits % 300ul == 0ul)
+    fprintf(stderr, "shim/fb: blit #%lu %dx%d -> painel %dx%d\n", sfb_blits, sw, sh, sfb_w, sfb_h);
+}
+
 __attribute__((visibility("default")))
 EGLBoolean eglSwapBuffers(EGLDisplay dpy, EGLSurface surface) {
   ensure_real();
@@ -506,7 +670,12 @@ EGLBoolean eglSwapBuffers(EGLDisplay dpy, EGLSurface surface) {
   if (!real_sb) real_sb = (EGLBoolean(*)(EGLDisplay, EGLSurface))sym("eglSwapBuffers");
   if (!real_sb) return EGL_FALSE;
   g_shim_swaps++;
-  return real_sb(dpy, surface);
+  if (g_shim_swaps <= 3ul || g_shim_swaps % 300ul == 0ul)
+    fprintf(stderr, "shim/libEGL: swap #%lu dpy=%p surface=%p (Unity passa por aqui, nao pelo probe)\n",
+            g_shim_swaps, (void*)dpy, (void*)surface);
+  EGLBoolean r = real_sb(dpy, surface);
+  sfb_present();   /* contexto do Unity esta corrente NESTA thread */
+  return r;
 }
 
 /* -------- debug hook (opcional) --------

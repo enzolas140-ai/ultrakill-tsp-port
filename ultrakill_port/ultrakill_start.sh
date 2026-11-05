@@ -251,37 +251,64 @@ if [ "$SPRUCE" = 1 ]; then
     export SDL_GAMECONTROLLER_USE_BUTTON_LABELS=0
     echo "   pad TSP: A/B pelo rotulo fisico (db privado em $UK_DB)"
   fi
-  # ---- trava do display / console (receita Cuphead + GTA SA) ----
+  # ---- display / DRM primary plane (receita NFSU2, engenharia reversa 05/11) ----
   if command -v flock >/dev/null 2>&1; then
     exec 8>/tmp/ports-android-display.lock
     flock -n 8 || echo "   AVISO: outra janela de port segura o display (lock ocupado)"
   fi
-  # ULTRAKILL fix -M (TRAVAMENTO NA LISTA DE JOGOS, relato de 04/11 20:0x):
-  # 'echo 0 > /sys/class/vtconsole/vtconN/bind' desliga o console do framebuffer
-  # e NINGUEM devolvia - o uk_cleanup so restaurava devfreq. Como este port morre
-  # por timeout (SIGTERM) e refazemos isso a cada teste, o console ficava
-  # desligado ate ao reboot: a ES para de repintar e parece que 'travou na lista
-  # de jogos' (e por isso nem log novo foi escrito). Agora:
-  #   (1) o unbind e OPT-IN (ULTRAKILL_DISPLAY_TAKEOVER=1) - nao da beneficio
-  #       nenhum aqui, porque o jogo nunca chegou a desenhar uma frame; o ES
-  #       continua no controle do painel;
-  #   (2) se alguem ligar, o uk_cleanup devolve o valor original;
-  #   (3) self-heal: se encontrarmos um vtcon em 0 (estrago de versao antiga),
-  #       ligamos de volta no boot, para a ES voltar a repintar.
+  # O que o NFSU2.sh faz (e documenta) antes de lancar o jogo:
+  #   # Unbind vtconsole to allow KMSDRM full access to DRM primary plane
+  #   echo 0 | $SUDO tee /sys/class/vtconsole/vtcon0/bind
+  #   echo 0 | $SUDO tee /sys/class/vtconsole/vtcon1/bind
+  # e na saida ele RE-VINCULA (echo 1 | tee ...) - e exatamente o passo que o
+  # nosso port nao tinha, o que deixou a ES congelada na lista uma vez.
+  # Por que isto e obrigatorio aqui: o teste de 05/11 pintou o padrao em
+  # /dev/fb0 e ele APARECEU (degradê RGB na faixa de 'ultimos jogados'), mas so
+  # em pedacos - o plano primario do DRM ainda era da ES. Sem o unbind o jogo
+  # nunca fica visível inteiro, por melhor que seja o present.
+  #
+  # ESUDO/tee: no spruceOS nao existe /usr/bin/sudo e o port ja roda como root.
+  # O truque do NFSU2 (SUDO="${ESUDO-sudo}", sem dois-pontos) mantem o vazio
+  # quando control.txt decidiu por vazio; 'echo X | tee arquivo' escreve mesmo
+  # sem redirecionamento privilegiado.
+  UK_SUDO="${ESUDO-sudo}"
+  command -v sudo >/dev/null 2>&1 || UK_SUDO=""
+  # console do firmware: spruce define CUR_TTY=/dev/null, outros usam /dev/tty1.
+  UK_TTY="${CUR_TTY:-}"
+  [ -n "$UK_TTY" ] || UK_TTY="${CURR_TTY:-}"
+  [ -n "$UK_TTY" ] || { [ -c /dev/tty0 ] && UK_TTY=/dev/tty0; }
+  [ -n "$UK_TTY" ] || UK_TTY=/dev/null
+  uk_vt_set() {  # $1 = 0 (desliga console) | 1 (devolve)
+    for f in /sys/class/vtconsole/vtcon0/bind /sys/class/vtconsole/vtcon1/bind; do
+      [ -e "$f" ] || continue
+      echo "$1" | $UK_SUDO tee "$f" > /dev/null 2>&1 || true
+    done
+  }
   UK_VT_RESTORE="/tmp/ultrakill-vt-$$"
   : > "$UK_VT_RESTORE" 2>/dev/null
-  for vt in /sys/class/vtconsole/vtcon0/bind /sys/class/vtconsole/vtcon1/bind; do
-    [ -e "$vt" ] || continue
-    NOW=$(cat "$vt" 2>/dev/null)
-    if [ "${ULTRAKILL_DISPLAY_TAKEOVER:-0}" = 1 ] && [ -w "$vt" ]; then
+  if [ "${ULTRAKILL_DISPLAY_TAKEOVER:-1}" != 0 ]; then
+    # limpa e esconde o cursor do console ANTES de desligar (ordem do NFSU2)
+    printf '\033c' > "$UK_TTY" 2>/dev/null || true
+    printf '\e[?25l' > "$UK_TTY" 2>/dev/null || true
+    for vt in /sys/class/vtconsole/vtcon0/bind /sys/class/vtconsole/vtcon1/bind; do
+      [ -e "$vt" ] || continue
+      NOW=$(cat "$vt" 2>/dev/null)
       [ -n "$NOW" ] && echo "$vt $NOW" >> "$UK_VT_RESTORE" 2>/dev/null
-      echo 0 > "$vt" 2>/dev/null
-    elif [ "${NOW:-1}" = 0 ]; then
-      if echo 1 > "$vt" 2>/dev/null; then
-        echo "   vtcon SELF-HEAL: $vt estava 0 (console desligado por run antigo); religado"
+    done
+    uk_vt_set 0
+    echo "   display: console desvinculado (DRM primary plane libero) tty=$UK_TTY sudo='${UK_SUDO:-<vazio=root>}'"
+  else
+    # self-heal: se um run antigo deixou vtcon=0, devolve agora para a ES voltar
+    # a repintar sem precisar de reboot.
+    for vt in /sys/class/vtconsole/vtcon0/bind /sys/class/vtconsole/vtcon1/bind; do
+      [ -e "$vt" ] || continue
+      NOW=$(cat "$vt" 2>/dev/null)
+      if [ "${NOW:-1}" = 0 ]; then
+        echo 1 | $UK_SUDO tee "$vt" > /dev/null 2>&1 || echo 1 > "$vt" 2>/dev/null
+        echo "   vtcon SELF-HEAL: $vt estava 0; religado (ULTRAKILL_DISPLAY_TAKEOVER=0)"
       fi
-    fi
-  done
+    done
+  fi
   # UK_DEVFREQ_RESTORE e o lock tem que ser desfeitos em QUALQUER saida (o
   # Cuphead faz igual no finish/trap EXIT): sem isto, um exit antecipado
   # (ex.: sem binario) deixava o SoC com min_freq no teto para a ES toda.
@@ -289,17 +316,17 @@ if [ "$SPRUCE" = 1 ]; then
   uk_cleanup() {
     [ "${uk_cleanup_done:-0}" = 1 ] && return 0
     uk_cleanup_done=1
-    # devolve o console do framebuffer SEMPRE (nao so se registrou valor):
-    # deixar vtcon em 0 e exatamente o que congela a UI da ES ate ao reboot.
-    for v in /sys/class/vtconsole/vtcon0/bind /sys/class/vtconsole/vtcon1/bind; do
-      [ -w "$v" ] && echo 1 > "$v" 2>/dev/null
-    done
+    # devolve o console SEMPRE (echo 1), nao so se registrou valor: deixar
+    # vtcon em 0 e o que congela a UI da ES ate ao reboot - o NFSU2 re-vincula
+    # na saida exatamente por isso.
+    uk_vt_set 1
     if [ -f "${UK_VT_RESTORE:-/nonexistent}" ]; then
       while read -r vpath vold; do
-        [ -n "$vpath" ] && [ -n "$vold" ] && echo "$vold" > "$vpath" 2>/dev/null
+        [ -n "$vpath" ] && [ -n "$vold" ] && echo "$vold" | $UK_SUDO tee "$vpath" > /dev/null 2>&1 || true
       done < "$UK_VT_RESTORE"
       rm -f "$UK_VT_RESTORE" 2>/dev/null || true
     fi
+    printf '\e[?25h' > "${UK_TTY:-/dev/null}" 2>/dev/null || true
     if [ -n "${UK_DEVFREQ_RESTORE:-}" ] && [ -f "$UK_DEVFREQ_RESTORE" ]; then
       while read -r upath uold; do
         [ -n "$upath" ] && [ -n "$uold" ] && echo "$uold" > "$upath" 2>/dev/null
@@ -1306,6 +1333,14 @@ if [ -f "$PROBE" ] && [ -f "$PLIB/libunity.so" ] && [ "$ULTRAKILL_LOADER" != "br
   # contexto SDL e faz SDL_GL_SwapWindow - o mesmo caminho que faz o Cuphead
   # aparecer no TSP. 0 = so /dev/fb0.
   export BENDER_UK_BLIT_SDL="${BENDER_UK_BLIT_SDL:-1}"
+  # ULTRAKILL fix -Q (o lugar onde o swap do Unity REALMENTE cai): o libunity.so tem
+  # NEEDED libEGL.so, e esse libEGL.so e o nosso shim em libs/arm64. Entao os swaps
+  # passam pelo shim, nao pelo probe (da ai guest_swaps=0). O shim agora le o framebuffer
+  # com o contexto do Unity corrente na thread dele e bate em /dev/fb0.
+  # ULTRAKILL_SHIM_FB=0 desliga; ULTRAKILL_EGL_STATS=1 faz o shim contar os swaps no exit.
+  export ULTRAKILL_SHIM_FB="${ULTRAKILL_SHIM_FB:-1}"
+  export ULTRAKILL_EGL_STATS="${ULTRAKILL_EGL_STATS:-1}"
+  echo "   shim/libEGL present: ULTRAKILL_SHIM_FB=$ULTRAKILL_SHIM_FB stats=$ULTRAKILL_EGL_STATS"
   echo ">> PRESENT fb: BENDER_UK_FB=$BENDER_UK_FB BENDER_UK_BLIT_SDL=$BENDER_UK_BLIT_SDL dev=$ULTRAKILL_FB_DEVICE surface=${BENDER_UK_WINDOW_W}x${BENDER_UK_WINDOW_H}"
   # ULTRAKILL fix -N: o jogo ja RODA (log de 05/11: audio, ES, GL, e ele
   # REESCREVE as proprias preferencias na saida). O auditor pegou isso: o
