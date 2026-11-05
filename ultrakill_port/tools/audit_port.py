@@ -214,6 +214,12 @@ def check_conf_keys(root, rep):
         p = os.path.join(root, b.replace('/', os.sep))
         if os.path.isfile(p):
             blob += open(p, 'rb').read()
+    # chaves repetidas: ao 'source', a ULTIMA vence - edicoes que trocam so a
+    # primeira ocorrencia deixam um valor fantasma mandando no device.
+    dup = sorted({k for k in keys if keys.count(k) > 1})
+    rep.add('OK' if not dup else 'FAIL', 'nenhuma chave duplicada no conf',
+            '%d chaves ativas' % len(keys) if not dup
+            else 'DUPLICADAS (ultima vence): ' + ', '.join(dup))
     orphans = []
     for k in keys:
         if k in launcher or k.encode() in blob or k in ('BENDER_MOUSE_CLICK_B', 'BENDER_MOUSE_TOGGLE_START_R1'):

@@ -6370,7 +6370,7 @@ static void uk_present(int w, int h) {
         long max_px  = emp && *emp ? atol(emp) : 1280L * 720L; /* pixels por candidato */
         if (epp && *epp) g_uk_probe_left = atoi(epp);
         if (g_uk_probe_left > 0 && g_uk_bind_fbo && g_uk_fbo_param && g_uk_read) {
-            unsigned cand[40]; int nc = 0, i, reads = 0;
+            unsigned cand[40]; int nc = 0, i, reads = 0, nok = 0, nsize = 0;
             int cur_bind = 0;
             unsigned id, best = g_uk_src_fbo;
             int best_sc = -1, bw = w, bh = h;
@@ -6387,7 +6387,9 @@ static void uk_present(int w, int h) {
                 for (j = 0; j < i; j++) if (cand[j] == id) { dup = 1; break; }
                 if (dup) continue;
                 if (!uk_fbo_ok(id)) continue;
+                nok++;
                 if (!uk_fbo_size(id, &rw, &rh)) continue;
+                nsize++;
                 if (rw <= 0 || rh <= 0) continue;
                 if ((long)rw * rh > max_px) continue;               /* pula monstros */
                 if ((size_t)rw * (size_t)rh * 4u > cap) continue;
@@ -6404,11 +6406,18 @@ static void uk_present(int w, int h) {
                 }
                 if (sc > best_sc) { best_sc = sc; best = id; bw = rw; bh = rh; }
             }
-            uk_log("[BENDER_UK_PRESENT][FBO] varredura: leituras=%d bind-atual=%u ultimo-RT=%u melhores=[%u:%d %u:%d %u:%d] -> escolhido fbo=%u %dx%d score=%d/1000 (passadas restantes %d)\n",
-                   reads, (unsigned)cur_bind, (unsigned)g_ri_last_fbo,
+            uk_log("[BENDER_UK_PRESENT][FBO] varredura: leituras=%d candidatos=%d fbo-completos=%d com-tamanho=%d bind-atual=%u ultimo-RT=%u melhores=[%u:%d %u:%d %u:%d] -> escolhido fbo=%u %dx%d score=%d/1000 (passadas restantes %d)\n",
+                   reads, nc, nok, nsize,
+                   (unsigned)cur_bind, (unsigned)g_ri_last_fbo,
                    tp_id[0], tp_sc[0], tp_id[1], tp_sc[1], tp_id[2], tp_sc[2],
                    best, bw, bh, best_sc, g_uk_probe_left);
             if (best_sc > 0) { g_uk_src_fbo = best; w = bw; h = bh; }
+        } else if (g_uk_probe_left <= 0 && (g_uk_present_calls % 60ul) == 0ul) {
+            /* fix -Y: o render target do Unity pode so existir DEPOIS do primeiro
+             * frame real. Com 3 passadas no arranjo a gente parava de procurar
+             * exatamente quando ele aparecia. Re-varrer a cada ~60 presents (o
+             * custo ja e limitado por max_reads/max_px). */
+            g_uk_probe_left = 1;
         }
     }
     if (g_uk_bind_fbo) g_uk_bind_fbo(UK_GL_READ_FRAMEBUFFER, g_uk_src_fbo);
