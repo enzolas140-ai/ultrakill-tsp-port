@@ -6180,6 +6180,11 @@ static int      g_uk_ctx_announced;
 #define UK_GL_FRAMEBUFFER_BINDING 0x8CA6u
 #define UK_GL_READ_FRAMEBUFFER_BINDING 0x8CAAu
 #define UK_GL_VERSION            0x1F02u
+#define UK_GL_FRAMEBUFFER_WIDTH   0x8B30u
+#define UK_GL_FRAMEBUFFER_HEIGHT  0x8B31u
+#define UK_GL_COLOR_ATTACHMENT0   0x8CE0u
+#define UK_GL_SAMPLES_ATTACHED    0x8D51u
+#define UK_GL_READ_BUFFER         0x0C0Cu
 #define UK_GL_COLOR_BUFFER_BIT   0x00004000u
 #define UK_GL_NEAREST            0x2600u
 typedef void (*UkBlitFramebufferFn)(int,int,int,int,int,int,int,int,unsigned,unsigned,int);
@@ -6235,17 +6240,20 @@ static void uk_gl_syms(void){
 }
 /* ULTRAKILL fix -T: tamanho REAL de um framebuffer (0 = janela). No log de 05/11
  * 08:45 o readback veio 480x270 = o render target ESCALADO do proprio Unity, lido
- * do FB0 (errado). Sem saber o tamanho do FBO, a leitura apanha so um canto. */
+ * do FB0 (errado). Sem saber o tamanho do FBO, a leitura apanha so um canto.
+ * fix -U: os enums eram O MEU BUG - GL_FRAMEBUFFER_WIDTH/HEIGHT sao 0x8B30/0x8B31
+ * (eu usava 0x8734/0x8735, que dao INVALID_ENUM e tamanho 0), entao TODO FBO era
+ * descartado e o FB0 quase vazio 'ganhava' a pontuacao. */
 static int uk_fbo_size(unsigned id,int *w,int *h){
     int vw=0,vh=0;
     *w=0;*h=0;
     if(!g_uk_fbo_param||!g_uk_bind_fbo)return 0;
     g_uk_bind_fbo(UK_GL_READ_FRAMEBUFFER,id);
-    g_uk_fbo_param(UK_GL_READ_FRAMEBUFFER,0x8CE0u /*GL_COLOR_ATTACHMENT0*/,0x8734u,&vw); /* FRAMEBUFFER_WIDTH */
-    g_uk_fbo_param(UK_GL_READ_FRAMEBUFFER,0x8CE0u,0x8735u,&vh);                            /* FRAMEBUFFER_HEIGHT */
+    g_uk_fbo_param(UK_GL_READ_FRAMEBUFFER,UK_GL_COLOR_ATTACHMENT0,UK_GL_FRAMEBUFFER_WIDTH,&vw);
+    g_uk_fbo_param(UK_GL_READ_FRAMEBUFFER,UK_GL_COLOR_ATTACHMENT0,UK_GL_FRAMEBUFFER_HEIGHT,&vh);
     if(vw<=0||vh<=0){
-        /* FB0 nao tem essas props; usa a janela drawable / viewport */
-        if(g_uk_get_integerv){g_uk_get_integerv(0x0BA2u,(int*)g_uk_vp_tmp);vw=g_uk_vp_tmp[2];vh=g_uk_vp_tmp[3];}
+        /* janela (FB0) nao expoe essas props: usa o viewport atual */
+        if(g_uk_get_integerv){ g_uk_get_integerv(0x0BA2u,g_uk_vp_tmp); vw=g_uk_vp_tmp[2]; vh=g_uk_vp_tmp[3]; }
     }
     if(vw<=0||vh<=0)return 0;
     *w=vw;*h=vh;return 1;
@@ -6253,11 +6261,12 @@ static int uk_fbo_size(unsigned id,int *w,int *h){
 static int uk_fbo_ok(unsigned id){
     if(id==0u)return 1;
     if(!g_uk_check_fbo)return 1;
-    /* glCheckFramebufferStatus depende do target bindado */
+    int prev=0;
+    if(g_uk_get_integerv)g_uk_get_integerv(UK_GL_FRAMEBUFFER_BINDING,&prev);
     if(g_uk_bind_fbo)g_uk_bind_fbo(UK_GL_FRAMEBUFFER,id);
     unsigned st=g_uk_check_fbo(UK_GL_FRAMEBUFFER);
-    if(g_uk_bind_fbo)g_uk_bind_fbo(UK_GL_FRAMEBUFFER,0u);
-    return st==0u||st==0x8CD5u; /* 0 = sem contexto; GL_FRAMEBUFFER_COMPLETE=0x8CD5 */
+    if(g_uk_bind_fbo)g_uk_bind_fbo(UK_GL_FRAMEBUFFER,(unsigned)prev);
+    return st==0x8CD5u; /* GL_FRAMEBUFFER_COMPLETE */
 }
 /* Pontuacao 0..1000 por amostragem (1 byte a cada 51). Barato e comparavel. */
 static int uk_score(const unsigned char *b,size_t n){
@@ -6329,14 +6338,29 @@ static void uk_present(int w, int h) {
      * o render target real do Unity nunca era procurado (log 08:45: fbo=0,
      * readback 480x270). Varre FB0 + FBOs 1..64, mede o tamanho real de cada um e
      * fica com o que tiver mais conteudo. So nos primeiros frames. */
+    /* fix -U: ordem de candidatos. O FBO que o Unity tem AMARRADO agora
+     * (GL_FRAMEBUFFER_BINDING e o ultimo glBindFramebuffer do inspetor) e o melhor
+     * palpite do render target - antes varriamos 1..64 as cegas e, com os enums
+     * errados, todos eram descartados. */
     {
         size_t cap = (size_t)g_uk_cap_w * (size_t)g_uk_cap_h * 4u;
         if (g_uk_probe_left > 0 && g_uk_bind_fbo && g_uk_fbo_param) {
+            unsigned cand[70]; int nc = 0, i;
+            int cur_bind = 0;
             unsigned id, best = g_uk_src_fbo;
             int best_sc = -1, bw = w, bh = h;
+            int shown[3]; int shown_id[3]; int shown_n = 0;
+            if (g_uk_get_integerv) g_uk_get_integerv(UK_GL_FRAMEBUFFER_BINDING, &cur_bind);
+            cand[nc++] = (unsigned)cur_bind;
+            cand[nc++] = (unsigned)g_ri_last_fbo;
+            cand[nc++] = 0u;
+            for (id = 1u; id <= 64u && nc < 70; id++) cand[nc++] = id;
             g_uk_probe_left--;
-            for (id = 0u; id <= 64u; id++) {
-                int rw = 0, rh = 0;
+            for (i = 0; i < nc; i++) {
+                int rw = 0, rh = 0, dup = 0, j;
+                id = cand[i];
+                for (j = 0; j < i; j++) if (cand[j] == id) { dup = 1; break; }
+                if (dup) continue;
                 if (!uk_fbo_ok(id)) continue;
                 if (!uk_fbo_size(id, &rw, &rh)) continue;
                 if (rw <= 0 || rh <= 0) continue;
@@ -6344,13 +6368,16 @@ static void uk_present(int w, int h) {
                 g_uk_bind_fbo(UK_GL_READ_FRAMEBUFFER, id);
                 g_uk_read(0, 0, rw, rh, 0x1908, 0x1401, g_uk_buf);
                 int sc = uk_score(g_uk_buf, (size_t)rw * (size_t)rh * 4u);
+                if (shown_n < 3) { shown[shown_n] = sc; shown_id[shown_n] = (int)id; shown_n++; }
                 if (sc > best_sc) { best_sc = sc; best = id; bw = rw; bh = rh; }
             }
-            if (best_sc > 0) {
-                g_uk_src_fbo = best; w = bw; h = bh;
-                uk_log("[BENDER_UK_PRESENT][FBO] fonte escolhida: fbo=%u %dx%d score=%d/1000\n",
-                       best, w, h, best_sc);
-            }
+            uk_log("[BENDER_UK_PRESENT][FBO] varredura: bind-atual=%u ultimo-RT=%u top3=[%u:%d %u:%d %u:%d] -> escolhido fbo=%u %dx%d score=%d/1000 (restam %d)\n",
+                   (unsigned)cur_bind, (unsigned)g_ri_last_fbo,
+                   shown_n>0?(unsigned)shown_id[0]:9999u, shown_n>0?shown[0]:-1,
+                   shown_n>1?(unsigned)shown_id[1]:9999u, shown_n>1?shown[1]:-1,
+                   shown_n>2?(unsigned)shown_id[2]:9999u, shown_n>2?shown[2]:-1,
+                   best, bw, bh, best_sc, g_uk_probe_left);
+            if (best_sc > 0) { g_uk_src_fbo = best; w = bw; h = bh; }
         }
     }
     if (g_uk_bind_fbo) g_uk_bind_fbo(UK_GL_READ_FRAMEBUFFER, g_uk_src_fbo);
