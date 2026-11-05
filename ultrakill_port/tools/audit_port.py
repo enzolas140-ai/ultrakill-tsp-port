@@ -487,10 +487,11 @@ def check_probe_markers(root, rep):
             b'BENDER_DIALOG_WAIT_RELEASE_SEC', b'BENDER_DIALOG_AUTODISMIS',
             b'BENDER_PLAYCORE_MISSING', b'BENDER_MOUSE_TOGGLE_START_R1', b'/dev/fb0']
     miss = [n.decode() for n in need if n not in d]
-    # 'fonte encontrada' era o log antigo; o fix -T passou a 'fonte escolhida'
-    # (pontuacao FB0 vs FBOs). Aceita qualquer um dos dois para o checker nao
-    # reprovar um binario MAIS novo por ter melhorado.
-    if 'fonte encontrada' in miss and b'fonte escolhida' in d:
+    # O rotulo dessa linha de log ja mudou de nome duas vezes (fonte encontrada ->
+    # fonte escolhida -> escolhido fbo=). Aceita QUALQUER variante para o checker
+    # nao reprovar um binario mais novo por ter melhorado.
+    aliases = [b'fonte encontrada', b'fonte escolhida', b'escolhido fbo', b'varredura:']
+    if 'fonte encontrada' in miss and any(a in d for a in aliases):
         miss.remove('fonte encontrada')
     rep.add('OK' if not miss else 'FAIL', 'probe instalado contem os knobs do conf',
             'todos presentes (%d bytes)' % len(d) if not miss else 'FALTAM: ' + ', '.join(miss))

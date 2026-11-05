@@ -6172,7 +6172,7 @@ static UkGetStringFn      g_uk_get_string;
 static UkGetFboAttachFn   g_uk_fbo_param;
 static UkCheckFboFn       g_uk_check_fbo;
 static unsigned g_uk_src_fbo;      /* 0 = framebuffer padrao */
-static int      g_uk_probe_left = 14;  /* varreduras de fonte (fix -T) */
+static int      g_uk_probe_left = 3;  /* varreduras de fonte (fix -V: era 14 e cada uma lia ~260MB) */
 static int      g_uk_ctx_announced;
 #define UK_GL_READ_FRAMEBUFFER   0x8CA8u
 #define UK_GL_DRAW_FRAMEBUFFER   0x8CA9u
@@ -6341,22 +6341,37 @@ static void uk_present(int w, int h) {
     /* fix -U: ordem de candidatos. O FBO que o Unity tem AMARRADO agora
      * (GL_FRAMEBUFFER_BINDING e o ultimo glBindFramebuffer do inspetor) e o melhor
      * palpite do render target - antes varriamos 1..64 as cegas e, com os enums
-     * errados, todos eram descartados. */
+     * errados, todos eram descartados.
+     *
+     * fix -V (dois defeitos MEUS aqui dentro, encontrados na revisao):
+     *  (a) custo: 70 candidatos x ate 3,7MB de glReadPixels = ~260MB por passada,
+     *      e eram ate 14 passadas (~3,6GB) - isso congela a thread do jogo por
+     *      segundos e chama o watchdog. Agora: poucas passadas, poucos candidatos,
+     *      teto de bytes por candidato e teto de leituras por passada.
+     *  (b) o log dizia 'top3' mas mostrava os 3 PRIMEIROS candidatos. Agora guarda
+     *      de verdade os 3 melhores por pontuacao.
+     * Envs: BENDER_UK_SCAN_PASSES, BENDER_UK_SCAN_MAX, BENDER_UK_SCAN_MAXPX. */
     {
         size_t cap = (size_t)g_uk_cap_w * (size_t)g_uk_cap_h * 4u;
-        if (g_uk_probe_left > 0 && g_uk_bind_fbo && g_uk_fbo_param) {
-            unsigned cand[70]; int nc = 0, i;
+        const char *epp = getenv("BENDER_UK_SCAN_PASSES");
+        const char *emx = getenv("BENDER_UK_SCAN_MAX");
+        const char *emp = getenv("BENDER_UK_SCAN_MAXPX");
+        int max_reads = emx && *emx ? atoi(emx) : 20;         /* candidatos por passada */
+        long max_px  = emp && *emp ? atol(emp) : 1280L * 720L; /* pixels por candidato */
+        if (epp && *epp) g_uk_probe_left = atoi(epp);
+        if (g_uk_probe_left > 0 && g_uk_bind_fbo && g_uk_fbo_param && g_uk_read) {
+            unsigned cand[40]; int nc = 0, i, reads = 0;
             int cur_bind = 0;
             unsigned id, best = g_uk_src_fbo;
             int best_sc = -1, bw = w, bh = h;
-            int shown[3]; int shown_id[3]; int shown_n = 0;
+            int tp_sc[3] = {-1,-1,-1}; unsigned tp_id[3] = {9999u,9999u,9999u};
             if (g_uk_get_integerv) g_uk_get_integerv(UK_GL_FRAMEBUFFER_BINDING, &cur_bind);
-            cand[nc++] = (unsigned)cur_bind;
-            cand[nc++] = (unsigned)g_ri_last_fbo;
-            cand[nc++] = 0u;
-            for (id = 1u; id <= 64u && nc < 70; id++) cand[nc++] = id;
+            if (cur_bind > 0) cand[nc++] = (unsigned)cur_bind;      /* o RT ativo primeiro */
+            if (g_ri_last_fbo > 0) cand[nc++] = (unsigned)g_ri_last_fbo;
+            cand[nc++] = 0u;                                        /* a janela (FB0) */
+            for (id = 1u; id <= 32u && nc < 40 && nc < max_reads; id++) cand[nc++] = id;
             g_uk_probe_left--;
-            for (i = 0; i < nc; i++) {
+            for (i = 0; i < nc && reads < max_reads; i++) {
                 int rw = 0, rh = 0, dup = 0, j;
                 id = cand[i];
                 for (j = 0; j < i; j++) if (cand[j] == id) { dup = 1; break; }
@@ -6364,18 +6379,24 @@ static void uk_present(int w, int h) {
                 if (!uk_fbo_ok(id)) continue;
                 if (!uk_fbo_size(id, &rw, &rh)) continue;
                 if (rw <= 0 || rh <= 0) continue;
+                if ((long)rw * rh > max_px) continue;               /* pula monstros */
                 if ((size_t)rw * (size_t)rh * 4u > cap) continue;
                 g_uk_bind_fbo(UK_GL_READ_FRAMEBUFFER, id);
                 g_uk_read(0, 0, rw, rh, 0x1908, 0x1401, g_uk_buf);
+                reads++;
                 int sc = uk_score(g_uk_buf, (size_t)rw * (size_t)rh * 4u);
-                if (shown_n < 3) { shown[shown_n] = sc; shown_id[shown_n] = (int)id; shown_n++; }
+                /* melhores 3 de verdade (insercao ordenada) */
+                for (j = 0; j < 3; j++) {
+                    if (sc > tp_sc[j]) {
+                        int q; for (q = 2; q > j; q--) { tp_sc[q] = tp_sc[q-1]; tp_id[q] = tp_id[q-1]; }
+                        tp_sc[j] = sc; tp_id[j] = id; break;
+                    }
+                }
                 if (sc > best_sc) { best_sc = sc; best = id; bw = rw; bh = rh; }
             }
-            uk_log("[BENDER_UK_PRESENT][FBO] varredura: bind-atual=%u ultimo-RT=%u top3=[%u:%d %u:%d %u:%d] -> escolhido fbo=%u %dx%d score=%d/1000 (restam %d)\n",
-                   (unsigned)cur_bind, (unsigned)g_ri_last_fbo,
-                   shown_n>0?(unsigned)shown_id[0]:9999u, shown_n>0?shown[0]:-1,
-                   shown_n>1?(unsigned)shown_id[1]:9999u, shown_n>1?shown[1]:-1,
-                   shown_n>2?(unsigned)shown_id[2]:9999u, shown_n>2?shown[2]:-1,
+            uk_log("[BENDER_UK_PRESENT][FBO] varredura: leituras=%d bind-atual=%u ultimo-RT=%u melhores=[%u:%d %u:%d %u:%d] -> escolhido fbo=%u %dx%d score=%d/1000 (passadas restantes %d)\n",
+                   reads, (unsigned)cur_bind, (unsigned)g_ri_last_fbo,
+                   tp_id[0], tp_sc[0], tp_id[1], tp_sc[1], tp_id[2], tp_sc[2],
                    best, bw, bh, best_sc, g_uk_probe_left);
             if (best_sc > 0) { g_uk_src_fbo = best; w = bw; h = bh; }
         }
