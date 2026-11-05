@@ -6270,22 +6270,30 @@ static int uk_fbo_ok(unsigned id){
     if(g_uk_bind_fbo)g_uk_bind_fbo(UK_GL_FRAMEBUFFER,(unsigned)prev);
     return st==0x8CD5u; /* GL_FRAMEBUFFER_COMPLETE */
 }
-/* Pontuacao 0..1000 por amostragem (1 byte a cada 51). Barato e comparavel. */
+/* ULTRAKILL fix -AA: bug de medicao que contaminou a sessao toda. O readback e RGBA
+ * e a amostra antiga era 1 byte a cada 51 - 51 % 4 == 3, ou seja caia no ALPHA, que
+ * vale 255 ate em pixel preto. Um buffer VAZIO pontuava ~660/1000 e vencia o FBO com
+ * o jogo de verdade (log 05/11 10:02: 'melhores=[0:661 20:569] -> escolhido fbo=0'),
+ * o que tambem desligava a rota de janela (ela exige um FBO escolhido).
+ * Agora: uma amostra a cada 16 PIXELS e conta apenas R|G|B nao-zero. */
 static int uk_score(const unsigned char *b,size_t n){
     size_t k,hits=0,tot=0;
-    if(!b||n<1024u)return 0;
-    for(k=0;k+51u<n;k+=51u){ tot++; if(b[k]) hits++; }
+    if(!b||n<16u)return 0;
+    for(k=0;k+3u<n;k+=64u){ tot++; if(b[k]||b[k+1u]||b[k+2u]) hits++; }
     if(!tot)return 0;
     return (int)(hits*1000ul/tot);
 }
-/* ULTRAKILL fix -W: checksum de amostras. O score engana em conteudo ESCURO (o
- * menu do ULTRAKILL e quase todo preto -> poucos bytes nao-zero NAO significa
- * ausencia de imagem). Se o cksum MUDA entre frames, tem jogo ali; se e constante,
- * e memoria nao inicializada do driver. */
+/* fix -AA: mesmo problema no checksum - amostra por PIXEL (3 bytes RGB, ignora
+ * alpha). Se o cksum MUDA entre frames, tem jogo ali; se fica constante, e lixo.
+ * NB: com o score antigo, 'constante' podia ser so o alpha uniforme a dominar. */
 static unsigned uk_cksum(const unsigned char *b,size_t n){
     size_t k; unsigned h=2166136261u;
     if(!b||n<4u)return 0;
-    for(k=0;k+3u<n;k+=4093u){ h=(h^(unsigned)b[k])*(16777619u); h=(h^(unsigned)b[k+2u])*(16777619u); }
+    for(k=0;k+3u<n;k+=252u){
+        h=(h^(unsigned)b[k])*(16777619u);
+        h=(h^(unsigned)b[k+1u])*(16777619u);
+        h=(h^(unsigned)b[k+2u])*(16777619u);
+    }
     return h;
 }
 /* Varredura esbocada: 1 byte a cada 997. Barato e suficiente para 'tem imagem'. */
@@ -6373,6 +6381,7 @@ static void uk_present(int w, int h) {
         if (epp && *epp) g_uk_probe_left = atoi(epp);
         if (g_uk_probe_left > 0 && g_uk_bind_fbo && g_uk_fbo_param && g_uk_read) {
             unsigned cand[40]; int nc = 0, i, reads = 0, nok = 0, nsize = 0;
+            unsigned rt_id = 0u; int rt_sc = -1;   /* melhor FBO nao-zero (o RT do jogo) */
             int cur_bind = 0;
             unsigned id, best = g_uk_src_fbo;
             int best_sc = -1, bw = w, bh = h;
@@ -6407,12 +6416,24 @@ static void uk_present(int w, int h) {
                     }
                 }
                 if (sc > best_sc) { best_sc = sc; best = id; bw = rw; bh = rh; }
+                if (id != 0u && sc > rt_sc) { rt_sc = sc; rt_id = id; }
             }
             uk_log("[BENDER_UK_PRESENT][FBO] varredura: leituras=%d candidatos=%d fbo-completos=%d com-tamanho=%d bind-atual=%u ultimo-RT=%u melhores=[%u:%d %u:%d %u:%d] -> escolhido fbo=%u %dx%d score=%d/1000 (passadas restantes %d)\n",
                    reads, nc, nok, nsize,
                    (unsigned)cur_bind, (unsigned)g_ri_last_fbo,
                    tp_id[0], tp_sc[0], tp_id[1], tp_sc[1], tp_id[2], tp_sc[2],
                    best, bw, bh, best_sc, g_uk_probe_left);
+            /* fix -AA2: se houver um FBO com pelo menos 80% do score do vencedor,
+             * ficamos com ELE - o FB0 pode ter o resto do ultimo swap e blitar
+             * FB0->FB0 e nao-op, e era isso que desligava a rota da janela. */
+            if (rt_id && rt_sc > 0 && best_sc > 0 && rt_sc * 5 >= best_sc * 4) {
+                int rw2 = 0, rh2 = 0;
+                if (uk_fbo_size(rt_id, &rw2, &rh2) && rw2 > 0 && rh2 > 0) {
+                    logmsg("[BENDER_UK_PRESENT][FBO] preferindo o RT do jogo: fbo=%u score=%d (vencedor bruto fbo=%u score=%d)\n",
+                           rt_id, rt_sc, best, best_sc);
+                    best = rt_id; best_sc = rt_sc; bw = rw2; bh = rh2;
+                }
+            }
             if (best_sc > 0) { g_uk_src_fbo = best; w = bw; h = bh; }
         } else if (g_uk_probe_left <= 0 && (g_uk_present_calls % 60ul) == 0ul) {
             /* fix -Y: o render target do Unity pode so existir DEPOIS do primeiro
