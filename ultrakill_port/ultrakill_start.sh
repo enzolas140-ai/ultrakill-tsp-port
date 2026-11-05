@@ -1343,6 +1343,11 @@ if [ -f "$PROBE" ] && [ -f "$PLIB/libunity.so" ] && [ "$ULTRAKILL_LOADER" != "br
   # com o contexto do Unity corrente na thread dele e bate em /dev/fb0.
   # ULTRAKILL_SHIM_FB=0 desliga; ULTRAKILL_EGL_STATS=1 faz o shim contar os swaps no exit.
   export ULTRAKILL_SHIM_FB="${ULTRAKILL_SHIM_FB:-1}"
+  # ULTRAKILL fix -R: como o Unity NUNCA chama eglSwapBuffers (shim carregado e zero
+  # 'libEGL: swap'; guest_swaps=0), o present e feito nos calls GL dele - glFlush/
+  # glFinish e o bind do framebuffer 0 - na thread do proprio Unity, onde o contexto
+  # esta corrente. Limitado a ~35/s. 0 = volta a depender do swap (nao acontece).
+  export BENDER_UK_FLUSH_PRESENT="${BENDER_UK_FLUSH_PRESENT:-1}"
   export ULTRAKILL_EGL_STATS="${ULTRAKILL_EGL_STATS:-1}"
   echo "   shim/libEGL present: ULTRAKILL_SHIM_FB=$ULTRAKILL_SHIM_FB stats=$ULTRAKILL_EGL_STATS"
   echo ">> PRESENT fb: BENDER_UK_FB=$BENDER_UK_FB BENDER_UK_BLIT_SDL=$BENDER_UK_BLIT_SDL dev=$ULTRAKILL_FB_DEVICE surface=${BENDER_UK_WINDOW_W}x${BENDER_UK_WINDOW_H}"

@@ -5856,11 +5856,25 @@ static void bender_input_draw_cursor(void){if((!g_bender_input_mouse_active&&!g_
 /* [BENDER_SOFT_KEYBOARD] source=fix99 text=nativeSetInputString layout=top-down */
 /* [BENDER_SOFT_KEYBOARD] source=fix100 text=pooled-known-jstring-string-getBytes-reusable-byte-array */
 /* ---------------- end BENDER Unity input test layer ---------------- */
+/* ULTRAKILL fix -R: forward decls (as definicoes ficam junto do present por
+ * framebuffer, mais abaixo). O Unity NUNCA chama eglSwapBuffers - a prova e que o
+ * shim esta CARREGADO no processo e nunca imprimiu 'libEGL: swap', e o probe conta
+ * guest_swaps=0 para sempre. Ele renderiza e para. As unicas oportunidades que
+ * temos na THREAD do Unity, com o contexto do Unity CORRENTE, sao os calls GL dele:
+ * glFlush/glFinish e o bind do framebuffer 0 (o resolve final para a janela). */
+static void uk_flush_present_throttled(void);
+static void bender_uk_glFlush(void);
+static void bender_uk_glFinish(void);
 static void bender_ri_announce(void){if(g_ri_announced)return;g_ri_announced=1;logmsg("[BENDER_RENDER_INSPECTOR][ENABLED] wrappers=clear,viewport,fbo,program,draw,blit framebuffer_sample=4x4 host_present_policy=single-present\\n");}
 static void bender_ri_glClear(unsigned int mask){static BenderGLClearFn f;if(!f)f=(BenderGLClearFn)bender_gl_real_proc("glClear");__atomic_add_fetch(&g_ri_clear_calls,1ul,__ATOMIC_RELAXED);bender_ri_announce();if(f)f(mask);}
 static void bender_ri_glClearColor(float r,float g,float b,float a){static BenderGLClearColorFn f;if(!f)f=(BenderGLClearColorFn)bender_gl_real_proc("glClearColor");g_ri_clear_color[0]=r;g_ri_clear_color[1]=g;g_ri_clear_color[2]=b;g_ri_clear_color[3]=a;__atomic_add_fetch(&g_ri_clear_color_calls,1ul,__ATOMIC_RELAXED);bender_ri_announce();if(f)f(r,g,b,a);}
 static void bender_ri_glViewport(int x,int y,int w,int h){static BenderGLViewportFn f;if(!f)f=(BenderGLViewportFn)bender_gl_real_proc("glViewport");g_ri_viewport[0]=x;g_ri_viewport[1]=y;g_ri_viewport[2]=w;g_ri_viewport[3]=h;g_bender_rs_logical_viewport_2768[0]=x;g_bender_rs_logical_viewport_2768[1]=y;g_bender_rs_logical_viewport_2768[2]=w;g_bender_rs_logical_viewport_2768[3]=h;if(bender_render_inspector_enabled()){__atomic_add_fetch(&g_ri_viewport_calls,1ul,__ATOMIC_RELAXED);bender_ri_announce();}if(f){if(g_bender_rs_active_2768&&g_bender_rs_logical_draw_fbo_2768==0u){if(w<=g_bender_rs_render_w_2768&&h<=g_bender_rs_render_h_2768)f(x,y,w,h);else f(bender_rs_scale_coord_2768(x,g_bender_rs_render_w_2768,g_bender_rs_physical_w_2768),bender_rs_scale_coord_2768(y,g_bender_rs_render_h_2768,g_bender_rs_physical_h_2768),bender_rs_scale_size_2768(w,g_bender_rs_render_w_2768,g_bender_rs_physical_w_2768),bender_rs_scale_size_2768(h,g_bender_rs_render_h_2768,g_bender_rs_physical_h_2768));}else f(x,y,w,h);}}
-static void bender_ri_glBindFramebuffer(unsigned int target,unsigned int fbo){static BenderGLBindFramebufferFn f;if(!f)f=(BenderGLBindFramebufferFn)bender_gl_real_proc("glBindFramebuffer");g_ri_last_fbo=fbo;if(bender_render_inspector_enabled()){__atomic_add_fetch(&g_ri_bind_fbo_calls,1ul,__ATOMIC_RELAXED);if(fbo==0u)__atomic_add_fetch(&g_ri_bind_fbo_zero_calls,1ul,__ATOMIC_RELAXED);bender_ri_announce();}if(g_bender_rs_active_2768){if(target==BENDER_RS_GL_FRAMEBUFFER){g_bender_rs_logical_draw_fbo_2768=fbo;g_bender_rs_logical_read_fbo_2768=fbo;}else if(target==BENDER_RS_GL_DRAW_FRAMEBUFFER)g_bender_rs_logical_draw_fbo_2768=fbo;else if(target==BENDER_RS_GL_READ_FRAMEBUFFER)g_bender_rs_logical_read_fbo_2768=fbo;if(f)f(target,bender_rs_actual_fbo_2768(fbo));}else if(f)f(target,fbo);}
+static void bender_ri_glBindFramebuffer(unsigned int target,unsigned int fbo){static BenderGLBindFramebufferFn f;if(!f)f=(BenderGLBindFramebufferFn)bender_gl_real_proc("glBindFramebuffer");g_ri_last_fbo=fbo;if(bender_render_inspector_enabled()){__atomic_add_fetch(&g_ri_bind_fbo_calls,1ul,__ATOMIC_RELAXED);if(fbo==0u)__atomic_add_fetch(&g_ri_bind_fbo_zero_calls,1ul,__ATOMIC_RELAXED);bender_ri_announce();}
+    /* ULTRAKILL fix -R: quando o Unity amarra o framebuffer 0 (janela) para o passe
+     * final, apresentamos o conteudo ANTERIOR (1 frame de atraso, invisivel na pratica)
+     * na thread dele, onde o contexto esta de facto corrente. */
+    if(fbo==0u&&(target==BENDER_RS_GL_FRAMEBUFFER||target==BENDER_RS_GL_DRAW_FRAMEBUFFER))uk_flush_present_throttled();
+    if(g_bender_rs_active_2768){if(target==BENDER_RS_GL_FRAMEBUFFER){g_bender_rs_logical_draw_fbo_2768=fbo;g_bender_rs_logical_read_fbo_2768=fbo;}else if(target==BENDER_RS_GL_DRAW_FRAMEBUFFER)g_bender_rs_logical_draw_fbo_2768=fbo;else if(target==BENDER_RS_GL_READ_FRAMEBUFFER)g_bender_rs_logical_read_fbo_2768=fbo;if(f)f(target,bender_rs_actual_fbo_2768(fbo));}else if(f)f(target,fbo);}
 static void bender_ri_glUseProgram(unsigned int program){static BenderGLUseProgramFn f;if(!f)f=(BenderGLUseProgramFn)bender_gl_real_proc("glUseProgram");__atomic_add_fetch(&g_ri_use_program_calls,1ul,__ATOMIC_RELAXED);bender_ri_announce();if(f)f(program);}
 static void bender_ri_glDrawArrays(unsigned int mode,int first,int count){static BenderGLDrawArraysFn f;if(!f)f=(BenderGLDrawArraysFn)bender_gl_real_proc("glDrawArrays");__atomic_add_fetch(&g_ri_draw_arrays_calls,1ul,__ATOMIC_RELAXED);bender_ri_announce();if(f)f(mode,first,count);}
 static void bender_ri_glDrawElements(unsigned int mode,int count,unsigned int type,const void*indices){static BenderGLDrawElementsFn f;if(!f)f=(BenderGLDrawElementsFn)bender_gl_real_proc("glDrawElements");__atomic_add_fetch(&g_ri_draw_elements_calls,1ul,__ATOMIC_RELAXED);bender_ri_announce();if(f)f(mode,count,type,indices);}
@@ -5903,6 +5917,13 @@ static void bender_glFramebufferTexture3D(unsigned int target,unsigned int attac
 }
 static void *bender_gles_proc_bridge(const char *name){
     if(!name)return NULL;
+    /* ULTRAKILL fix -R: glFlush/glFinish do guest passam a ser NOSSOS wrappers, para
+     * apresentar na thread do Unity (ele nao swapa nunca). BENDER_UK_FLUSH_PRESENT=0
+     * devolve os originais sem recompilar. */
+    if((!strcmp(name,"glFlush")||!strcmp(name,"glFinish"))){
+        const char *e=getenv("BENDER_UK_FLUSH_PRESENT");
+        if(!(e&&!strcmp(e,"0"))) return (!strcmp(name,"glFlush"))?(void*)bender_uk_glFlush:(void*)bender_uk_glFinish;
+    }
     if(bender_render_scale_enabled_2768()){
         if(strcmp(name,"glViewport")==0)return (void*)bender_ri_glViewport;
         if(strcmp(name,"glBindFramebuffer")==0)return (void*)bender_ri_glBindFramebuffer;
@@ -6267,6 +6288,30 @@ present:
                g_uk_present_calls, w, h, g_uk_src_fbo, total - nz, total);
     }
 }
+
+/* ULTRAKILL fix -R: apresentacao na thread do proprio Unity. Chamado por
+ * glFlush/glFinish e pelo bind do FB0 - os tres unicos momentos em que o contexto
+ * do Unity esta corrente e a gente pode ler o quadro dele. Taxa limitada a ~35/s
+ * para nao afogar o 30 FPS alvo com readback+blit a cada call. */
+static unsigned long g_uk_flush_present_calls;
+static long long g_uk_flush_last_ms;
+static long long uk_monotonic_ms(void){
+    struct timespec ts;
+    if(clock_gettime(CLOCK_MONOTONIC,&ts)!=0)return 0;
+    return (long long)ts.tv_sec*1000LL+(long long)(ts.tv_nsec/1000000L);
+}
+static void uk_flush_present_throttled(void){
+    const char *e=getenv("BENDER_UK_FLUSH_PRESENT");
+    if(e&&!strcmp(e,"0"))return;
+    long long now=uk_monotonic_ms();
+    if(g_uk_flush_last_ms&&(now-g_uk_flush_last_ms)<28LL)return;
+    g_uk_flush_last_ms=now;
+    uk_fb_present_frame(0,0);
+    unsigned long n=__atomic_add_fetch(&g_uk_flush_present_calls,1ul,__ATOMIC_RELAXED);
+    if(n<=3ul||n%300ul==0ul)logmsg("[BENDER_UK_FLUSH_PRESENT] n=%lu apresentando na thread do Unity (contexto corrente)\n",n);
+}
+static void bender_uk_glFlush(void){typedef void(*Fn)(void);Fn f=(Fn)bender_gl_real_proc("glFlush");if(f)f();uk_flush_present_throttled();}
+static void bender_uk_glFinish(void){typedef void(*Fn)(void);Fn f=(Fn)bender_gl_real_proc("glFinish");if(f)f();uk_flush_present_throttled();}
 
 /* ULTRAKILL fix -N: present por framebuffer para o caminho COM SDL.
  * O blit para /dev/fb0 ja existia, mas so era chamado dentro de

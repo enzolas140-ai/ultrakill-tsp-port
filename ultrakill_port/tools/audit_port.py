@@ -482,6 +482,7 @@ def check_probe_markers(root, rep):
         rep.add('FAIL', 'probe instalado', 'unity_probe.aarch64 ausente'); return
     d = open(p, 'rb').read()
     need = [b'BENDER_UK_FB', b'BENDER_UK_BLIT_SDL', b'BENDER_UK_WINDOW_W', b'BENDER_UK_PRESENT',
+            b'BENDER_UK_FLUSH_PRESENT', b'BENDER_UK_SWAP_BRIDGE', b'UK_FLUSH_PRESENT]',
             b'fonte encontrada',
             b'BENDER_DIALOG_WAIT_RELEASE_SEC', b'BENDER_DIALOG_AUTODISMIS',
             b'BENDER_PLAYCORE_MISSING', b'BENDER_MOUSE_TOGGLE_START_R1', b'/dev/fb0']
