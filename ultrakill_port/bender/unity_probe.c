@@ -6038,6 +6038,8 @@ static size_t g_uk_scan_bytes;   /* fix -AB: bytes ate a pagina realmente em sca
 static unsigned g_uk_scan_lines;
 static unsigned g_uk_flip;        /* 0 = sem page flip (escreve sempre na pagina vista) */
 static unsigned g_uk_page, g_uk_double, g_uk_cap_w, g_uk_cap_h;
+static unsigned g_uk_rb_swap;     /* fix -AG2: 1 = troca R e B na escrita do fb */
+static unsigned g_uk_fy = 1u, g_uk_fx = 1u;   /* fix -AG: virar Y e X no blit por CPU */
 
 /* ULTRAKILL fix -AE: escreve em TODOS os /dev/fbN que existirem.
  * So a pergunta 'qual fb e o painel?' nao tem resposta offline aqui (sunxi com
@@ -6092,7 +6094,8 @@ static void uk_fb2_blit_all(const unsigned char *rgba, int sw, int sh) {
         UkFb *x = &g_uk_fb2[d];
         if (!x->map || !x->w || !x->h) continue;
         for (unsigned y = 0; y < x->h; y++) {
-            unsigned sy = (unsigned)((unsigned long long)y * (unsigned long long)sh / x->h);
+            unsigned yy = g_uk_fy ? (unsigned)(x->h - 1u - y) : y;                              /* fix -AG */
+            unsigned sy = (unsigned)((unsigned long long)yy * (unsigned long long)sh / x->h);
             if (sy >= (unsigned)sh) sy = (unsigned)sh - 1u;
             if ((size_t)y * x->pitch + (size_t)x->w * (x->bpp / 8u) > x->len) break;
             const unsigned char *sr = rgba + (size_t)sy * (size_t)sw * 4u;
@@ -6100,6 +6103,7 @@ static void uk_fb2_blit_all(const unsigned char *rgba, int sw, int sh) {
             for (unsigned xx = 0; xx < x->w; xx++) {
                 unsigned sx = (unsigned)((unsigned long long)xx * (unsigned long long)sw / x->w);
                 if (sx >= (unsigned)sw) sx = (unsigned)sw - 1u;
+                if (g_uk_fx) sx = (unsigned)sw - 1u - sx;   /* fix -AG: espelho horizontal */
                 const unsigned char *p = sr + (size_t)sx * 4u;
                 if (x->bpp == 32u) {
                     unsigned r = p[0] >> (8 - x->rl), g2 = p[1] >> (8 - x->gl), b = p[2] >> (8 - x->bl);
@@ -6159,6 +6163,17 @@ static int uk_fb_init(int src_w, int src_h) {
     g_uk_cap_w = var.xres > 1280u ? var.xres : 1280u;
     g_uk_cap_h = var.yres > 720u ? var.yres : 720u;
     g_uk_ro = var.red.offset; g_uk_go = var.green.offset; g_uk_bo = var.blue.offset;
+    { const char *rb = getenv("ULTRAKILL_FB_RB"); g_uk_rb_swap = (rb && !strcmp(rb, "1")) ? 1u : 0u; }
+    /* fix -AG: o painel do TSP parece montado a 180 graus - a captura do fb saiu
+     * DE PONTA CABECA e ESPELHADA horizontalmente (relato do usuario). Dois knobs
+     * explicitos, ambos ligados por omissao:
+     *   ULTRAKILL_FB_FLIP_Y=0  -> nao vira vertical
+     *   ULTRAKILL_FB_FLIP_X=0  -> nao vira horizontal
+     * So afectam os blits por CPU (fb0/extras); o glBlitFramebuffer RT->janela e o
+     * driver que orienta. */
+    { const char *fy = getenv("ULTRAKILL_FB_FLIP_Y"); if (fy && !strcmp(fy, "0")) g_uk_fy = 0u; }
+    { const char *fx = getenv("ULTRAKILL_FB_FLIP_X"); if (fx && !strcmp(fx, "0")) g_uk_fx = 0u; }
+    uk_log("[BENDER_UK_PRESENT] orientacao do blit CPU: flipY=%u flipX=%u rbswap=%u\n", g_uk_fy, g_uk_fx, g_uk_rb_swap);
     g_uk_rl = var.red.length ? var.red.length : 8;
     g_uk_gl = var.green.length ? var.green.length : 8;
     g_uk_bl = var.blue.length ? var.blue.length : 8;
@@ -6218,14 +6233,19 @@ static void *uk_gl_addr(const char *name) {
 static void uk_fb_blit(const unsigned char *rgba, int sw, int sh) {
     unsigned char *base = (unsigned char *)g_uk_fbmap;
     unsigned y, x;
-    /* fix -AB: escreve na pagina que o driver esta a varrer (yoffset lido no init).
+    /* fix -AG: glReadPixels devolve de BAIXO para CIMA (origem GL no canto
+     * inferior esquerdo) e o painel do TSP esta montado ao contrario: a captura
+     * saiu de cabeca para baixo E espelhada. Os dois eixos sao virados aqui,
+     * controlaveis por ULTRAKILL_FB_FLIP_Y / ULTRAKILL_FB_FLIP_X. */
+    /* fix -AE: escreve na pagina que o driver esta a varrer (yoffset lido no init).
      * So alterna paginas se BENDER_UK_FB_FLIP=1 mesmo assim. */
     if (g_uk_scan_bytes)
         base += g_uk_scan_bytes;
     if (g_uk_flip && g_uk_page)
         base += g_uk_page_bytes;
     for (y = 0; y < g_uk_h; y++) {
-        unsigned sy = (unsigned)((unsigned long long)y * (unsigned long long)sh / (g_uk_h ? g_uk_h : 1));
+        unsigned yy = g_uk_fy ? (unsigned)(g_uk_h - 1u - y) : y;
+        unsigned sy = (unsigned)((unsigned long long)yy * (unsigned long long)sh / (g_uk_h ? g_uk_h : 1));
         unsigned char *drow;
         const unsigned char *srow;
         if (sy >= (unsigned)sh) sy = sh - 1;
@@ -6236,16 +6256,23 @@ static void uk_fb_blit(const unsigned char *rgba, int sw, int sh) {
             unsigned sx = (unsigned)((unsigned long long)x * (unsigned long long)sw / (g_uk_w ? g_uk_w : 1));
             const unsigned char *p;
             if (sx >= (unsigned)sw) sx = sw - 1;
+            if (g_uk_fx) sx = (unsigned)sw - 1u - sx;   /* fix -AG: espelho horizontal */
             p = srow + (size_t)sx * 4u;
             if (g_uk_bpp == 32) {
-                uint32_t v = ((uint32_t)(p[0] >> (8 - g_uk_rl)) << g_uk_ro)
+                /* fix -AG2: ULTRAKILL_FB_RB=1 troca R e B. O display engine do sunxi
+                 * pode interpretar o ARGB do fb ao contrario do que var.red/blue.offset
+                 * declaram (a captura saiu com cores trocadas); este knob deixa testar
+                 * isso sem recompilar. */
+                unsigned int iR = g_uk_rb_swap ? 2u : 0u, iB = g_uk_rb_swap ? 0u : 2u;
+                uint32_t v = ((uint32_t)(p[iR] >> (8 - g_uk_rl)) << g_uk_ro)
                            | ((uint32_t)(p[1] >> (8 - g_uk_gl)) << g_uk_go)
-                           | ((uint32_t)(p[2] >> (8 - g_uk_bl)) << g_uk_bo);
+                           | ((uint32_t)(p[iB] >> (8 - g_uk_bl)) << g_uk_bo);
                 ((uint32_t *)drow)[x] = v;
             } else {
-                uint16_t v = (uint16_t)(((p[0] >> (8 - g_uk_rl)) << g_uk_ro)
+                unsigned int iR = g_uk_rb_swap ? 2u : 0u, iB = g_uk_rb_swap ? 0u : 2u;
+                uint16_t v = (uint16_t)(((p[iR] >> (8 - g_uk_rl)) << g_uk_ro)
                       | ((p[1] >> (8 - g_uk_gl)) << g_uk_go)
-                      | ((p[2] >> (8 - g_uk_bl)) << g_uk_bo));
+                      | ((p[iB] >> (8 - g_uk_bl)) << g_uk_bo));
                 ((uint16_t *)drow)[x] = v;
             }
         }
