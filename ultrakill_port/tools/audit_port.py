@@ -488,6 +488,17 @@ def check_probe_markers(root, rep):
     miss = [n.decode() for n in need if n not in d]
     rep.add('OK' if not miss else 'FAIL', 'probe instalado contem os knobs do conf',
             'todos presentes (%d bytes)' % len(d) if not miss else 'FALTAM: ' + ', '.join(miss))
+    # O shim EGL e binario separado do probe: ja aconteceu de o CI compilar o shim
+    # novo e o cartao continuar com o velho porque a lista de instalacao nao tinha
+    # libEGL.so. Entao o conteudo do shim e checado como invariante.
+    sh = os.path.join(root, 'libs', 'arm64', 'libEGL.so')
+    if os.path.isfile(sh):
+        sd = open(sh, 'rb').read()
+        need_sh = [b'ULTRAKILL_SHIM_FB', b'shim/fb:', b'shim/libEGL: swap']
+        ms = [n.decode() for n in need_sh if n not in sd]
+        rep.add('OK' if not ms else 'FAIL', 'shim libEGL.so instalado tem o present por fb',
+                'present no shim (%d bytes)' % len(sd) if not ms
+                else 'FALTAM: %s - o cartao esta com shim ANTIGO (adicione libs/arm64/libEGL.so ao INSTALL do ci_roundtrip e rode --install-only)' % ', '.join(ms))
     lau = os.path.join(root, 'ultrakill_start.sh')
     if os.path.isfile(lau):
         s = open(lau, encoding='utf-8', errors='replace').read()

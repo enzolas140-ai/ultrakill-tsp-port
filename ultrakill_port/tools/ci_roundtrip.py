@@ -48,6 +48,11 @@ SKIP_DIR = ('build-arm64', 'build-host', '__pycache__', '.git', '.backups')
 
 # o que volta do artifact para o cartao (binario)
 INSTALL = [('libs/arm64/libOpenSLES.so', 'libs/arm64/libOpenSLES.so'),
+           # O shim EGL e quem carrega o present por framebuffer agora. Sem esta
+           # linha ele era compilado no CI e NUNCA ia para o cartao (errado real de
+           # 05/11: build #122 OK, shim novo no artifact, cartao com o velho).
+           ('libs/arm64/libEGL.so', 'libs/arm64/libEGL.so'),
+           ('libs/arm64/libGLESv2.so', 'libs/arm64/libGLESv2.so'),
            ('libs/arm64/libandroid.so', 'libs/arm64/libandroid.so'),
            ('libs/arm64/liblog.so', 'libs/arm64/liblog.so'),
            ('libs/arm64/libmediandk.so', 'libs/arm64/libmediandk.so'),

@@ -1304,7 +1304,11 @@ if [ -f "$PROBE" ] && [ -f "$PLIB/libunity.so" ] && [ "$ULTRAKILL_LOADER" != "br
   export BENDER_RENDER_IDLE_WATCHDOG_SEC="${BENDER_RENDER_IDLE_WATCHDOG_SEC:-90}"
   export BENDER_RENDER_ABSOLUTE_WATCHDOG_SEC="${BENDER_RENDER_ABSOLUTE_WATCHDOG_SEC:-900}"
   export BENDER_RENDER_EXTEND_SEC="${BENDER_RENDER_EXTEND_SEC:-120}"
-  export BENDER_RENDER_INSPECT="${BENDER_RENDER_INSPECT:-0}"
+    # ULTRAKILL fix -Q: o inspetor liga os wrappers de glBindFramebuffer/glViewport/
+    # glBlitFramebuffer e amostra o framebuffer a cada swap (4x4). Esta 0 desde o
+    # comeco, por isso nunca soubemos ONDE o quadro do Unity mora. Ele e passivo
+    # (mede e loga), entao ligar nao piora nada: 1 = ligado.
+  export BENDER_RENDER_INSPECT="${BENDER_RENDER_INSPECT:-1}"
   # Play Core: com BENDER_PLAYCORE_MISSING=1 o Unity entende que o Google Play
   # NAO esta no aparelho e para de criar o fluxo de "instalar pack" (Dialog +
   # Runnable na UI thread) - foi esse Runnable que travou o 1o frame em 04/11

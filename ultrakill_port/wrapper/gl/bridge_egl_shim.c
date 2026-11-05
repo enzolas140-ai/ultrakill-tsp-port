@@ -499,6 +499,21 @@ EGLBoolean eglDestroySurface(EGLDisplay dpy, EGLSurface surface) {
   return real_ds(dpy, surface);
 }
 
+/* ======== ULTRAKILL fix -Q: prova de carregamento ===============
+ * O shim nao imprimiu UMA linha em 4 rodadas (nem 'shim/libEGL: swap'), entao
+ * ou o libunity.so nao resolve libEGL em nos (pega o driver real direto), ou o
+ * stderr nao esta sendo capturado. Este constructor responde a primeira parte no
+ * proprio unity_probe.log: se aparecer 'CARREGADO', o shim esta no meio e o swap
+ * do Unity simplesmente nunca acontece; se NAO aparecer, o present tem que ser
+ * feito no probe e o shim e um beco sem saida - nada mais e chutado as cegas. */
+#include <unistd.h>
+__attribute__((constructor))
+static void shim_ctor_report(void) {
+  fprintf(stderr, "shim/libEGL: CARREGADO pid=%d ppid=%d (libEGL.so do port, nao o driver)\n",
+          (int)getpid(), (int)getppid());
+  fflush(stderr);
+}
+
 /* ==== ULTRAKILL fix -Q: present por framebuffer DENTRO do shim ==========
  * Motivo (log de 05/11 07:56): o probe conta `guest_swaps=0` para SEMPRE, porque o
  * libunity.so tem `NEEDED libEGL.so` = este shim; os swaps vao para o driver real e o
