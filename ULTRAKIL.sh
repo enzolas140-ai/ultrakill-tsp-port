@@ -142,6 +142,30 @@ cd "$GAMEDIR" || exit 1
 if [ -f "$GAMEDIR/ultrakill_start.bin" ] && [ ! -f "$GAMEDIR/ultrakill_start.sh" ]; then
   cp -f "$GAMEDIR/ultrakill_start.bin" "$GAMEDIR/ultrakill_start.sh" 2>/dev/null || true
 fi
+# ULTRAKILL fix -AC: em exFAT com cache do Windows e ejecao sem 'remover com
+# seguranca', o .sh do device pode ficar VELHO enquanto o .bin (ou o probe) ja e
+# novo - e o launcher velho anula qualquer correcao (foi o que aconteceu nas
+# rodadas de 05/11 10:16 e 10:23: o MAPA DE DISPLAY nunca saiu porque rodou um
+# launcher anterior). Entao: se os dois forem diferentes, usa-se o MAIS NOVO e
+# copia-se para o outro. Assim a divergencia se cura sozinha, independentemente de
+# qual dos dois o Windows conseguiu gravar.
+if [ -f "$GAMEDIR/ultrakill_start.sh" ] && [ -f "$GAMEDIR/ultrakill_start.bin" ]; then
+  if [ "$GAMEDIR/ultrakill_start.bin" -nt "$GAMEDIR/ultrakill_start.sh" ]; then
+    if ! cmp -s "$GAMEDIR/ultrakill_start.bin" "$GAMEDIR/ultrakill_start.sh"; then
+      cp -f "$GAMEDIR/ultrakill_start.bin" "$GAMEDIR/ultrakill_start.sh" 2>/dev/null || true
+      echo "  curado: ultrakill_start.sh era mais velho que o .bin; re-copidado" >> "$ENTRY_LOG" 2>/dev/null || true
+    fi
+  elif [ "$GAMEDIR/ultrakill_start.sh" -nt "$GAMEDIR/ultrakill_start.bin" ]; then
+    if ! cmp -s "$GAMEDIR/ultrakill_start.sh" "$GAMEDIR/ultrakill_start.bin"; then
+      cp -f "$GAMEDIR/ultrakill_start.sh" "$GAMEDIR/ultrakill_start.bin" 2>/dev/null || true
+      echo "  curado: ultrakill_start.bin era mais velho que o .sh; re-copidado" >> "$ENTRY_LOG" 2>/dev/null || true
+    fi
+  fi
+fi
+# selo de revisao: para o log dizer QUAL launcher rodou (acaba com os 'mesmo erro'
+# ambiguos entre device velho e correcao errada)
+ULTRA_REV="rev -AD (mapa de display com marcadores, sem redirecionamento)"
+echo "$ULTRA_REV  entry $(date '+%H:%M:%S')" >> "$ENTRY_LOG" 2>/dev/null || true
 chmod a+x "$GAMEDIR/ultrakill_start.sh" 2>/dev/null || true
 
 BINSH=/bin/bash

@@ -380,9 +380,15 @@ if [ "$SPRUCE" = 1 ]; then
           echo "    SDL_VIDEODRIVER=${SDL_VIDEODRIVER:-} REAL_LIBEGL=${ULTRAKILL_REAL_LIBEGL:-}" \
                "BENDER_SDL_LIBRARY=${BENDER_SDL_LIBRARY:-}"
           echo "========================="
-      } >> "$LOG" 2>/dev/null
+      }
   }
+  # O bloco ANTERIOR tinha '>> "$LOG" 2>/dev/null' e sumia sem rastro no device
+  # (localmente funciona). Sem redirecionamento: o stdout do script ja vai para o
+  # mesmo log, e assim nao ha como o redirecionar engolir o bloco. Os dois ecos de
+  # contorno dizem se a chamada foi alcancada.
+  echo "   (mapa de display: inicio)"
   uk_display_map
+  echo "   (mapa de display: fim rc=$?)"
   # ---- GPU/RAM clocks do spruceOS (devfreq; Cuphead faz o mesmo) ----
   # Guarda o valor ANTES de subir e restaura no fim (arquivo em /tmp, porque
   # /sys nao aceita criar ficheiros). min_freq no teto = sem DVFS no meio da
@@ -427,6 +433,7 @@ echo ">> FPS alvo: ${ULTRAKILL_TARGET_FPS} (frame US=${UK_FRAME_US}, pacing=${UL
 
 # ---------------------------------------------------------------- 0a. PREFLIGHT: gamedata
 phase "checando payload"
+echo ">> LAUNCHER rev -AD (mapa de display sem redirecionamento, com marcadores)"
 # Detecta se o payload ja foi extraido. Se nao, roda extract_payload.py
 # contra o APK bundlado (ou um dos paths alternativos).
 extract_needed=1

@@ -6039,6 +6039,80 @@ static unsigned g_uk_scan_lines;
 static unsigned g_uk_flip;        /* 0 = sem page flip (escreve sempre na pagina vista) */
 static unsigned g_uk_page, g_uk_double, g_uk_cap_w, g_uk_cap_h;
 
+/* ULTRAKILL fix -AE: escreve em TODOS os /dev/fbN que existirem.
+ * So a pergunta 'qual fb e o painel?' nao tem resposta offline aqui (sunxi com
+ * Mali DDK + SDL 'mali' pode ter fb0 como consola e um outro como saida do DDK,
+ * ou vice-versa). Em vez de chutar, abrimos/mapeamos ate 3 dispositivos extras e
+ * batemos o mesmo frame em todos: se um deles e o painel, o usuario ve. O log
+ * revela o que foi encontrado (resolucao/bpp/pitch por device), o que substitui a
+ * parte mais importante do MAPA DE DISPLAY. ULTRAKILL_FB_ALL=0 volta ao so fb0.
+ * Com ULTRAKILL_FB_DEVICE definido explicitamente, só esse device e usado. */
+typedef struct {
+    int fd; void *map; size_t len;
+    unsigned w, h, pitch, bpp, ro, go, bo, rl, gl, bl;
+    size_t page_bytes; unsigned scan_lines, dbl;
+} UkFb;
+static UkFb g_uk_fb2[3];
+static int  g_uk_nfb2;
+
+static int uk_fb2_open(int idx) {
+    char path[64];
+    UkFb *x = &g_uk_fb2[g_uk_nfb2];
+    struct fb_var_screeninfo v; struct fb_fix_screeninfo f;
+    snprintf(path, sizeof(path), "/dev/fb%d", idx);
+    memset(x, 0, sizeof(*x));
+    x->fd = open(path, O_RDWR | O_CLOEXEC);
+    if (x->fd < 0) return 0;
+    if (ioctl(x->fd, FBIOGET_VSCREENINFO, &v) || ioctl(x->fd, FBIOGET_FSCREENINFO, &f)) { close(x->fd); memset(x, 0, sizeof(*x)); return 0; }
+    if (v.xres < 64u || v.yres < 64u) { close(x->fd); memset(x, 0, sizeof(*x)); return 0; }
+    x->w = v.xres; x->h = v.yres; x->pitch = f.line_length; x->bpp = v.bits_per_pixel;
+    x->ro = v.red.offset; x->go = v.green.offset; x->bo = v.blue.offset;
+    x->rl = v.red.length ? v.red.length : 8;
+    x->gl = v.green.length ? v.green.length : 8;
+    x->bl = v.blue.length ? v.blue.length : 8;
+    size_t need = (size_t)f.line_length * (v.yres_virtual ? (size_t)v.yres_virtual : (size_t)v.yres);
+    x->len = (f.smem_len && (size_t)f.smem_len < need) ? (size_t)f.smem_len : need;
+    void *m = mmap(0, x->len, PROT_READ | PROT_WRITE, MAP_SHARED, x->fd, 0);
+    if (m == MAP_FAILED) { close(x->fd); memset(x, 0, sizeof(*x)); return 0; }
+    x->map = m;
+    x->page_bytes = (size_t)f.line_length * (size_t)v.yres;
+    x->dbl = (v.yres_virtual >= 2u * v.yres) ? 1u : 0u;
+    x->scan_lines = v.yoffset;
+    if (x->dbl && (size_t)x->scan_lines * f.line_length + (size_t)f.line_length * v.yres <= x->len)
+        x->map = (char *)m + (size_t)x->scan_lines * f.line_length;
+    uk_log("[BENDER_UK_PRESENT] fb%d: %ux%u bpp=%u pitch=%u len=%zu yoffset=%u duplo=%u -> TAMBEM recebe frames\n",
+           idx, x->w, x->h, x->bpp, x->pitch, x->len, x->scan_lines, x->dbl);
+    g_uk_nfb2++;
+    return 1;
+}
+
+static void uk_fb2_blit_all(const unsigned char *rgba, int sw, int sh) {
+    int d;
+    for (d = 0; d < g_uk_nfb2; d++) {
+        UkFb *x = &g_uk_fb2[d];
+        if (!x->map || !x->w || !x->h) continue;
+        for (unsigned y = 0; y < x->h; y++) {
+            unsigned sy = (unsigned)((unsigned long long)y * (unsigned long long)sh / x->h);
+            if (sy >= (unsigned)sh) sy = (unsigned)sh - 1u;
+            if ((size_t)y * x->pitch + (size_t)x->w * (x->bpp / 8u) > x->len) break;
+            const unsigned char *sr = rgba + (size_t)sy * (size_t)sw * 4u;
+            unsigned char *dr = (unsigned char *)x->map + (size_t)y * x->pitch;
+            for (unsigned xx = 0; xx < x->w; xx++) {
+                unsigned sx = (unsigned)((unsigned long long)xx * (unsigned long long)sw / x->w);
+                if (sx >= (unsigned)sw) sx = (unsigned)sw - 1u;
+                const unsigned char *p = sr + (size_t)sx * 4u;
+                if (x->bpp == 32u) {
+                    unsigned r = p[0] >> (8 - x->rl), g2 = p[1] >> (8 - x->gl), b = p[2] >> (8 - x->bl);
+                    ((unsigned *)dr)[xx] = (r << x->ro) | (g2 << x->go) | (b << x->bo);
+                } else if (x->bpp == 16u) {
+                    unsigned r = p[0] >> (8 - x->rl), g2 = p[1] >> (8 - x->gl), b = p[2] >> (8 - x->bl);
+                    ((unsigned short *)dr)[xx] = (unsigned short)((r << x->ro) | (g2 << x->go) | (b << x->bo));
+                }
+            }
+        }
+    }
+}
+
 static int uk_fb_init(int src_w, int src_h) {
     struct fb_var_screeninfo var;
     struct fb_fix_screeninfo finfo;
@@ -6116,6 +6190,15 @@ static int uk_fb_init(int src_w, int src_h) {
            g_uk_w, g_uk_h, g_uk_bpp, g_uk_pitch, src_w, src_h);
     uk_test_pattern((unsigned char *)g_uk_fbmap + (g_uk_scan_bytes < (size_t)g_uk_fblen ? g_uk_scan_bytes : 0),
                     g_uk_w, g_uk_h, g_uk_pitch);
+    /* fix -AE: devices extras (so se o device nao foi fixado manualmente) */
+    { const char *only = getenv("ULTRAKILL_FB_DEVICE");
+      const char *all  = getenv("ULTRAKILL_FB_ALL");
+      if (!(all && !strcmp(all, "0")) && !(only && *only)) {
+          int fbidx = (strstr(dev, "/fb") ? atoi(strstr(dev, "/fb") + 3) : 0);
+          for (int k = 0; k < 4 && g_uk_nfb2 < 3; k++) if (k != fbidx) uk_fb2_open(k);
+          if (!g_uk_nfb2) uk_log("[BENDER_UK_PRESENT] nenhum fb extra alem de %s\n", dev);
+      }
+    }
     uk_log("[BENDER_UK_PRESENT] padrao de teste pintado (tarja branca + degrade RGB). Se aparecer, o video esta vivo.\n");
     return 0;
 }
@@ -6478,6 +6561,7 @@ present:
      * sempre na pagina em scanout e nao fazemos pan nenhum. */
     if (g_uk_flip && g_uk_page_bytes) g_uk_page ^= 1u;
     uk_fb_blit(g_uk_buf, w, h);
+    if (g_uk_nfb2) uk_fb2_blit_all(g_uk_buf, w, h);   /* fix -AE: todos os fbs */
     if (g_uk_flip && g_uk_page_bytes) {
         g_uk_var.yoffset = (unsigned)(g_uk_page * (g_uk_page_bytes / (g_uk_pitch ? g_uk_pitch : 1u)));
         if (ioctl(g_uk_fbfd, FBIOPAN_DISPLAY, &g_uk_var) != 0) {
@@ -6563,9 +6647,20 @@ static int uk_guest_present_via_window(void){
     g_uk_bind_fbo(UK_GL_DRAW_FRAMEBUFFER, (unsigned)prev_draw);
     g_uk_bind_fbo(UK_GL_READ_FRAMEBUFFER, (unsigned)prev_read);
     int did = uk_host_egl_swap_probe();
+    /* fix -AF: o eglSwapBuffers CRU do driver nao chega ao painel, porque no TSP o
+     * present do backend 'mali' do SDL do firmware faz mais do que trocar buffers
+     * (flip de camada no display engine - por isso NFSU2/Cuphead aparecem e nos
+     * nao, apesar de swap=EGL_TRUE). Estamos na THREAD do Unity com o contexto SDL
+     * dela corrente (uk_host_egl_swap_probe viu display/surface validos), entao o
+     * SDL_GL_SwapWindow aqui e seguro - o que fazia dano era chama-lo do frame loop
+     * do probe, que e OUTRA thread (por isso ULTRAKILL_HOST_PRESENT continua 0).
+     * BENDER_UK_SDL_SWAP=0 desliga este passo. */
+    { const char *ss = getenv("BENDER_UK_SDL_SWAP");
+      if (!(ss && !strcmp(ss, "0")) && g_sdl_GL_SwapWindow && g_bender_sdl_window)
+          g_sdl_GL_SwapWindow(g_bender_sdl_window); }
     static unsigned long n;
     if (++n <= 5ul || n % 300ul == 0ul)
-        logmsg("[BENDER_UK_WINDOW_SWAP] n=%lu RT=fbo%u %dx%d -> janela %dx%d swap=%d\n", n, g_uk_src_fbo, sw, sh, dw, dh, did);
+        logmsg("[BENDER_UK_WINDOW_SWAP] n=%lu RT=fbo%u %dx%d -> janela %dx%d swap=%d +SDL_GL_SwapWindow\n", n, g_uk_src_fbo, sw, sh, dw, dh, did);
     return did;
 }
 
